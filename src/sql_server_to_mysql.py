@@ -28,6 +28,71 @@ SQL Server到MySQL语法转换工具
 import argparse
 import os
 import re
+import logging
+import time
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 预编译常用正则表达式
+# 注释处理
+MULTILINE_COMMENT_PATTERN = re.compile(r'\/\*.*?\*\/', re.DOTALL)
+SINGLELINE_COMMENT_PATTERN = re.compile(r'--.*$', re.MULTILINE)
+QUOTED_PATTERN = re.compile(r"'[^']*'")
+
+# DROP TABLE语句
+DROP_TABLE_PATTERN1 = re.compile(r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'\[dbo\]\.\[(\w+)\]\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \[dbo\]\.\[\1\]')
+DROP_TABLE_PATTERN2 = re.compile(r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'(\w+)\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \1')
+
+# IDENTITY_INSERT语句
+IDENTITY_INSERT_ON_PATTERNS = [
+    re.compile(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+ON', re.IGNORECASE),
+    re.compile(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+ON', re.IGNORECASE),
+    re.compile(r'SET\s+IDENTITY_INSERT\s+.*?\s+ON', re.IGNORECASE)
+]
+IDENTITY_INSERT_OFF_PATTERNS = [
+    re.compile(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+OFF', re.IGNORECASE),
+    re.compile(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+OFF', re.IGNORECASE),
+    re.compile(r'SET\s+IDENTITY_INSERT\s+.*?\s+OFF', re.IGNORECASE)
+]
+
+# ALTER TABLE语句
+ALTER_TABLE_LOCK_ESCALATION_PATTERNS = [
+    re.compile(r'ALTER\s+TABLE\s+\[.*?\]\.\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', re.IGNORECASE),
+    re.compile(r'ALTER\s+TABLE\s+\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', re.IGNORECASE),
+    re.compile(r'ALTER\s+TABLE\s+.*?\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', re.IGNORECASE)
+]
+ALTER_TABLE_PRIMARY_KEY_PATTERN = re.compile(r'ALTER\s+TABLE\s+(.+?)\s+ADD\s+CONSTRAINT\s+(.+?)\s+PRIMARY\s+KEY.*?WITH\s*\([^)]+\)\s+ON\s+PRIMARY', re.IGNORECASE | re.DOTALL)
+WITH_ON_PRIMARY_PATTERN = re.compile(r'\s+WITH\s*\([^)]+\)\s+ON\s+PRIMARY\s*', re.IGNORECASE)
+WITH_ON_PRIMARY_PATTERN2 = re.compile(r'\s*WITH\s*\([^)]*\)\s*ON\s+PRIMARY\s*', re.IGNORECASE | re.DOTALL)
+
+# 主键注释
+PRIMARY_KEY_COMMENT_PATTERN = re.compile(r'\s*--\s*Primary\s+Key\s+structure\s+for\s+table.*?\n', re.IGNORECASE)
+COMMENT_SEPARATOR_PATTERN = re.compile(r'\s*--\s*----------------------------\s*--\s*----------------------------\s*\n', re.IGNORECASE)
+
+# 复杂的主键定义
+COMPLEX_PRIMARY_KEY_PATTERN1 = re.compile(r'\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?', re.IGNORECASE | re.DOTALL)
+COMPLEX_PRIMARY_KEY_PATTERN2 = re.compile(r'\s*--\s*----------------------------\s*\n\s*--\s*Primary\s+Key\s+structure\s+for\s+table\s+.*?\n\s*--\s*----------------------------\s*\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?', re.IGNORECASE | re.DOTALL)
+COMPLEX_PRIMARY_KEY_PATTERN3 = re.compile(r'ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n', re.IGNORECASE)
+COMPLEX_PRIMARY_KEY_PATTERN4 = re.compile(r'\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*$', re.IGNORECASE)
+
+# 列定义和数据类型
+BRACKET_PATTERN = re.compile(r'\[([^\]]+)\]')
+COLLATE_PATTERN = re.compile(r'\s+COLLATE\s+Chinese_PRC_CI_AS', re.IGNORECASE)
+COLLATE_GENERAL_PATTERN = re.compile(r'\s+COLLATE\s+[^\s,]+', re.IGNORECASE)
+DBO_PREFIX_PATTERN = re.compile(r'\bdbo\.')
+UNICODE_STRING_PATTERN = re.compile(r"N'([^']*)'")
+NUMERIC_TO_DECIMAL_PATTERN = re.compile(r'\bnumeric\b', re.IGNORECASE)
+GO_STATEMENT_PATTERN = re.compile(r'\bGO\b')
+MONEY_TO_DECIMAL_PATTERN = re.compile(r'\bmoney\b', re.IGNORECASE)
+MONEY_PATTERN = re.compile(r'\bmoney\b', re.IGNORECASE)
+IDENTITY_PATTERN = re.compile(r'\s+IDENTITY\([^)]+\)', re.IGNORECASE)
+AUTO_INCREMENT_PATTERN = re.compile(r'(\[?\w+\]?)\s+int\s+(NOT\s+NULL|NULL)', re.IGNORECASE)
+PRIMARY_KEY_COL_PATTERN = re.compile(r'(\[?\w+\]?)\s+int\s+AUTO_INCREMENT\s+NOT\s+NULL', re.IGNORECASE)
+
+# CREATE TABLE语句
+CREATE_TABLE_PATTERN = re.compile(r'CREATE TABLE\s+(\[?dbo\]?\.)?\[?(\w+)\]?\s*\((.*?)\)\s*;', re.DOTALL | re.IGNORECASE)
 
 
 def parse_arguments():
@@ -48,13 +113,22 @@ def convert_sql_server_to_mysql(sql_content):
     Returns:
         转换后的MySQL格式的SQL内容
     """
+    # 记录转换开始时间，用于性能分析
+    start_time = time.time()
+    logger.info("开始SQL Server到MySQL语法转换...")
+    
+    # 记录原始内容大小
+    logger.info(f"原始SQL内容大小: {len(sql_content)} 字符")
+    
+    # 记录处理步骤
+    logger.info("步骤 1: 处理多行和单行注释...")
+    
     # 移除所有多行注释 /* ... */
-    sql_content = re.sub(r'\/\*.*?\*\/', '', sql_content, flags=re.DOTALL)
+    # sql_content = MULTILINE_COMMENT_PATTERN.sub('', sql_content)
     
     # 移除所有单行注释 --
     # 注意：需要考虑引号内的注释符号不应被移除
     # 先处理引号内的内容，暂时替换掉，处理完注释后再恢复
-    quoted_pattern = re.compile(r"'[^']*'")
     quoted_matches = []
     
     def replace_quoted(match):
@@ -62,120 +136,94 @@ def convert_sql_server_to_mysql(sql_content):
         return f"__QUOTED_PLACEHOLDER_{len(quoted_matches) - 1}__"
     
     # 替换所有引号内的内容为占位符
-    sql_content = quoted_pattern.sub(replace_quoted, sql_content)
+    # sql_content = QUOTED_PATTERN.sub(replace_quoted, sql_content)
     
     # 移除所有单行注释
-    sql_content = re.sub(r'--.*$', '', sql_content, flags=re.MULTILINE)
+    sql_content = SINGLELINE_COMMENT_PATTERN.sub('', sql_content)
     
     # 恢复引号内的内容
     for i, quoted_text in enumerate(quoted_matches):
         sql_content = sql_content.replace(f"__QUOTED_PLACEHOLDER_{i}__", quoted_text)
     
+    logger.info("完成注释处理")
+    
+    # 记录处理步骤
+    logger.info("步骤 2: 转换DROP TABLE语句...")
+    
     # 1. 转换DROP TABLE语句
-    sql_content = re.sub(
-        r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'\[dbo\]\.\[(\w+)\]\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \[dbo\]\.\[\1\]',
-        r'DROP TABLE IF EXISTS \1',
-        sql_content
-    )
-    sql_content = re.sub(
-        r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'(\w+)\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \1',
-        r'DROP TABLE IF EXISTS \1',
-        sql_content
-    )
+    sql_content = DROP_TABLE_PATTERN1.sub(r'DROP TABLE IF EXISTS \1', sql_content)
+    sql_content = DROP_TABLE_PATTERN2.sub(r'DROP TABLE IF EXISTS \1', sql_content)
+    
+    logger.info("完成DROP TABLE语句转换")
+    
+    # 记录处理步骤
+    logger.info("步骤 3: 转换IDENTITY_INSERT语句...")
     
     # 2. 转换SET IDENTITY_INSERT语句为MySQL语法
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+.*?\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
+    for pattern in IDENTITY_INSERT_ON_PATTERNS:
+        sql_content = pattern.sub('SET FOREIGN_KEY_CHECKS=0;', sql_content)
     
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+.*?\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
+    for pattern in IDENTITY_INSERT_OFF_PATTERNS:
+        sql_content = pattern.sub('SET FOREIGN_KEY_CHECKS=1;', sql_content)
+    
+    logger.info("完成IDENTITY_INSERT语句转换")
+    
+    # 记录处理步骤
+    logger.info("步骤 4: 处理ALTER TABLE和其他语句...")
     
     # 3. 移除ALTER TABLE SET LOCK_ESCALATION语句
-    sql_content = re.sub(r'ALTER\s+TABLE\s+\[.*?\]\.\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'ALTER\s+TABLE\s+\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
-    sql_content = re.sub(r'ALTER\s+TABLE\s+.*?\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
+    for pattern in ALTER_TABLE_LOCK_ESCALATION_PATTERNS:
+        sql_content = pattern.sub('', sql_content)
     
-    # 4. 处理ALTER TABLE ADD CONSTRAINT语句，移除SQL Server特有的WITH子句和ON PRIMARY
-    sql_content = re.sub(
-        r'ALTER\s+TABLE\s+(.+?)\s+ADD\s+CONSTRAINT\s+(.+?)\s+PRIMARY\s+KEY.*?WITH\s*\([^)]+\)\s+ON\s+PRIMARY',
-        r'ALTER TABLE \1 ADD PRIMARY KEY',
-        sql_content,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+    logger.info("完成ALTER TABLE SET LOCK_ESCALATION语句处理")
     
-    # 更精确地处理WITH子句和ON PRIMARY部分（针对复杂的PRIMARY KEY定义）
-    sql_content = re.sub(
-        r'\s+WITH\s*\([^)]+\)\s+ON\s+PRIMARY\s*',
-        '',
-        sql_content,
-        flags=re.IGNORECASE
-    )
+    # 记录处理步骤
+    logger.info("步骤 5: 移除COLLATE子句和dbo.前缀...")
     
-    # 移除主键注释语句
-    sql_content = re.sub(r'\s*--\s*Primary\s+Key\s+structure\s+for\s+table.*?\n', '\n', sql_content, flags=re.IGNORECASE)
+    # 移除COLLATE子句和删除dbo.前缀 - 合并操作
+    sql_content = COLLATE_PATTERN.sub('', sql_content)
+    sql_content = DBO_PREFIX_PATTERN.sub('', sql_content)
     
-    # 移除更复杂的WITH子句和ON PRIMARY结构
-    sql_content = re.sub(
-        r'\s*WITH\s*\([^)]*\)\s*ON\s+PRIMARY\s*',
-        '',
-        sql_content,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+    logger.info("完成COLLATE子句和dbo.前缀处理")
     
-    # 移除SQL Server特有的主键注释分隔符
-    sql_content = re.sub(r'\s*--\s*----------------------------\s*--\s*----------------------------\s*\n', '\n', sql_content, flags=re.IGNORECASE)
+    # 记录处理步骤
+    logger.info("步骤 6: 处理字符串格式...")
     
-    # 移除完整的ALTER TABLE ADD CONSTRAINT语句（包括WITH和ON PRIMARY）
-    sql_content = re.sub(
-        r'\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?',
-        '',
-        sql_content,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+    # 转换N''字符串为MySQL格式
+    sql_content = UNICODE_STRING_PATTERN.sub(lambda m: "'" + m.group(1) + "'", sql_content)
     
-    # 移除最后的多行主键定义语句（包含主键结构注释）
-    sql_content = re.sub(
-        r'\s*--\s*----------------------------\s*\n\s*--\s*Primary\s+Key\s+structure\s+for\s+table\s+.*?\n\s*--\s*----------------------------\s*\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?',
-        '',
-        sql_content,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+    logger.info("完成字符串格式转换")
     
-    # 移除独立的ALTER TABLE PRIMARY KEY语句（多行格式）
-    sql_content = re.sub(
-        r'ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n',
-        '',
-        sql_content,
-        flags=re.IGNORECASE
-    )
+    # 记录处理步骤
+    logger.info("步骤 7: 标识符处理...")
     
-    # 移除文件末尾的ALTER TABLE语句（确保文件结尾干净）
-    sql_content = re.sub(
-        r'\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*$',
-        '',
-        sql_content,
-        flags=re.IGNORECASE
-    )
+    # 在这里不要移除方括号，让CREATE TABLE处理函数来统一处理
+    # sql_content = BRACKET_PATTERN.sub(r'\1', sql_content)
     
-    # 移除SQL Server特有的COLLATE子句
-    sql_content = re.sub(r'\s+COLLATE\s+Chinese_PRC_CI_AS', '', sql_content, flags=re.IGNORECASE)
+    logger.info("完成标识符处理准备")
     
-    # 删除dbo.前缀
-    sql_content = re.sub(r'\bdbo\.', '', sql_content)
+    # 记录处理步骤
+    logger.info("步骤 8: 转换数据类型...")
     
-    # 转换SQL Server的Unicode字符串格式 N'' 为MySQL格式 ''
-    sql_content = re.sub(r"N'([^']*)'", r"'\1'", sql_content)
+    # 转换数据类型：numeric、money等
+    sql_content = NUMERIC_TO_DECIMAL_PATTERN.sub('decimal', sql_content)
+    sql_content = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', sql_content)
     
-    # 移除方括号标识符
-    sql_content = re.sub(r'\[([^\]]+)\]', r'\1', sql_content)
+    logger.info("完成数据类型转换")
     
-    # 转换numeric为decimal
-    sql_content = re.sub(r'\bnumeric\b', 'decimal', sql_content, flags=re.IGNORECASE)
+    # 记录处理步骤
+    logger.info("步骤 9: 将GO语句替换为分号...")
     
-    # 3. 处理GO语句：将GO语句替换为分号
-    sql_content = re.sub(r'\bGO\b', ';', sql_content)
+    # 将GO语句替换为分号
+    sql_content = GO_STATEMENT_PATTERN.sub(';', sql_content)
+    
+    logger.info("完成GO语句转换")
+    
+    # 记录处理步骤
+    logger.info("步骤 10: 处理INSERT数据...")
+    
+    # 获取原始行数，用于进度日志
+    total_lines = len(sql_content.split('\n'))
     
     # 4. 处理包含INSERT数据的完整文件
     lines = sql_content.split('\n')
@@ -184,6 +232,11 @@ def convert_sql_server_to_mysql(sql_content):
     
     for i, line in enumerate(lines):
         line = line.rstrip()
+        
+        # 每处理100行输出一次进度日志
+        if i % 100 == 0:
+            progress_percent = (i / total_lines) * 100
+            logger.info(f"处理行进度: {i}/{total_lines} 行 ({progress_percent:.1f}%)")
         
         # 如果已经决定跳过所有内容，跳过
         if skip_everything:
@@ -195,39 +248,46 @@ def convert_sql_server_to_mysql(sql_content):
         
         # 检查是否到了主键约束定义区域，从这里开始跳过所有内容
         if ('ALTER TABLE' in line and 'ADD CONSTRAINT' in line and 'PRIMARY KEY' in line) or 'Primary Key structure' in line:
+            logger.info(f"跳过主键约束定义部分，行 {i}")
             skip_everything = True
             continue
         
-        # 处理当前行
+        # 组合优化：一次性完成多个字符串操作
+        # 移除方括号、COLLATE子句、dbo.前缀、转换N''字符串和移除不支持的语句
         processed_line = line
+        processed_line = BRACKET_PATTERN.sub(r'\1', processed_line)
+        processed_line = COLLATE_PATTERN.sub('', processed_line)
+        processed_line = DBO_PREFIX_PATTERN.sub('', processed_line)
+        processed_line = UNICODE_STRING_PATTERN.sub(lambda m: "'" + m.group(1) + "'", processed_line)
+        processed_line = NUMERIC_TO_DECIMAL_PATTERN.sub('decimal', processed_line)
+        processed_line = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', processed_line)
         
-        # 移除方括号
-        processed_line = re.sub(r'\[([^\]]+)\]', r'\1', processed_line)
-        
-        # 移除COLLATE Chinese_PRC_CI_AS
-        processed_line = re.sub(r'COLLATE\s+Chinese_PRC_CI_AS', '', processed_line, flags=re.IGNORECASE)
-        
-        # 删除dbo.前缀
-        processed_line = re.sub(r'\bdbo\.', '', processed_line)
-        
-        # 转换SQL Server的Unicode字符串格式 N'' 为MySQL格式 ''
-        processed_line = re.sub(r"N'([^']*)'", r"'\1'", processed_line)
+        # 在INSERT数据处理步骤也移除ALTER TABLE SET LOCK_ESCALATION
+        if re.search(r'ALTER TABLE.*SET\s+LOCK_ESCALATION', processed_line, re.IGNORECASE):
+            processed_line = ''
         
         # 保留非空的处理后行
         if processed_line.strip() or not line.strip():
             processed_lines.append(processed_line if processed_line.strip() == '' else processed_line)
     
+    logger.info("完成INSERT数据处理")
+    
     # 重建SQL内容
     sql_content = '\n'.join(processed_lines)
     
+    # 记录处理步骤
+    logger.info("步骤 11: 处理CREATE TABLE语句...")
+    
     # 5. 更精确地处理CREATE TABLE语句
-    # 使用正则表达式匹配CREATE TABLE语句 - 修复为非贪婪匹配
+    # 使用预编译的正则表达式匹配CREATE TABLE语句
     create_table_pattern = re.compile(r'CREATE TABLE\s+(\[?dbo\]?\.)?\[?(\w+)\]?\s*\((.*?)\)\s*;', re.DOTALL | re.IGNORECASE)
     
     def process_create_table(match):
         # 获取表名（去掉可能的dbo.前缀）
         table_name = match.group(2)
         table_body = match.group(3)
+        
+        logger.info(f"处理CREATE TABLE语句: {table_name}")
         
         # 处理列定义
         lines = table_body.split('\n')
@@ -250,21 +310,19 @@ def convert_sql_server_to_mysql(sql_content):
             
             # 处理IDENTITY列（在处理方括号之前）
             if 'IDENTITY(' in sql_part:
-                # 移除IDENTITY关键字
-                sql_part = re.sub(r'\s+IDENTITY\([^)]+\)', '', sql_part, flags=re.IGNORECASE)
-                # 添加AUTO_INCREMENT
-                sql_part = re.sub(r'(\[?\w+\]?)\s+int\s+(NOT\s+NULL|NULL)', r'\1 int AUTO_INCREMENT \2', sql_part, flags=re.IGNORECASE)
+                # 移除IDENTITY关键字并添加AUTO_INCREMENT
+                sql_part = IDENTITY_PATTERN.sub('', sql_part)
+                # 添加AUTO_INCREMENT到int列定义
+                sql_part = AUTO_INCREMENT_PATTERN.sub(r'\1 int AUTO_INCREMENT \2', sql_part)
                 # 记录主键列名
-                pk_match = re.search(r'(\[?\w+\]?)\s+int\s+AUTO_INCREMENT\s+NOT\s+NULL', sql_part, flags=re.IGNORECASE)
+                pk_match = PRIMARY_KEY_COL_PATTERN.search(sql_part)
                 if pk_match:
                     primary_key_col = pk_match.group(1)
             
-            # 移除方括号
-            sql_part = re.sub(r'\[(\w+)\]', r'\1', sql_part)
-            # 移除COLLATE子句
-            sql_part = re.sub(r'\s+COLLATE\s+[^\s,]+', '', sql_part, flags=re.IGNORECASE)
-            # 转换数据类型
-            sql_part = re.sub(r'\bmoney\b', 'decimal(19,4)', sql_part, flags=re.IGNORECASE)
+            # 合并多个字符串操作：移除方括号、COLLATE子句和转换数据类型
+            sql_part = BRACKET_PATTERN.sub(r'\1', sql_part)
+            sql_part = COLLATE_PATTERN.sub('', sql_part)
+            sql_part = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', sql_part)
             
             # 移除尾随逗号
             sql_part = sql_part.rstrip(',')
@@ -291,11 +349,15 @@ def convert_sql_server_to_mysql(sql_content):
             # 添加主键约束
             new_table_body += f',\n  PRIMARY KEY ({clean_pk_col})'
         
+        logger.info(f"完成表 {table_name} 的CREATE TABLE处理")
+        
         # 重建CREATE TABLE语句
         return f'CREATE TABLE {table_name} (\n  {new_table_body}\n)'
     
     # 替换所有CREATE TABLE语句
     sql_content = create_table_pattern.sub(process_create_table, sql_content)
+    
+    logger.info("完成CREATE TABLE语句处理")
     
     # 6. 清理多余的空行
     sql_content = re.sub(r'\n\s*\n', '\n\n', sql_content)
