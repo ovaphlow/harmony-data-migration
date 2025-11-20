@@ -5,11 +5,24 @@ MySQL SQL执行器
 """
 
 import argparse
+import logging
 import os
 import re
 import pymysql
 from pymysql import Error
+import time
 from dotenv import load_dotenv
+
+# 配置日志记录
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('mysql_executor.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # 加载.env文件
 load_dotenv()
@@ -46,7 +59,7 @@ def validate_input_file(file_path):
     # 检查文件扩展名
     valid_extensions = ['.sql', '.SQL']
     if not any(file_path.lower().endswith(ext) for ext in valid_extensions):
-        print(f"警告: 文件扩展名不是标准的 .sql，但继续处理...")
+        logger.warning(f"文件扩展名不是标准的 .sql，但继续处理...")
 
 
 def split_sql_statements(sql_content):
@@ -105,18 +118,21 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
         # 读取文件内容
         with open(sql_file, 'r', encoding='utf-8') as f:
             sql_content = f.read()
-        print(f"成功读取文件: {sql_file}")
-        print(f"文件大小: {os.path.getsize(sql_file)} 字节")
+        logger.info(f"成功读取文件: {sql_file}")
+        logger.info(f"文件大小: {os.path.getsize(sql_file)} 字节")
         
         # 分割SQL语句
         statements = split_sql_statements(sql_content)
-        print(f"解析出 {len(statements)} 条SQL语句")
+        logger.info(f"解析出 {len(statements)} 条SQL语句")
         
         if dry_run:
-            print("\n=== 干运行模式 - 以下是将要执行的SQL语句 ===")
+            logger.info("\n=== 干运行模式 - 以下是将要执行的SQL语句 ===")
             for i, statement in enumerate(statements, 1):
-                print(f"\n--- 语句 {i} ---")
-                print(statement[:200] + "..." if len(statement) > 200 else statement)
+                logger.info(f"\n--- 语句 {i} ---")
+                if len(statement) > 200:
+                    logger.info(statement[:200] + "...")
+                else:
+                    logger.info(statement)
             return True
         
         # 连接数据库并执行
@@ -136,7 +152,7 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                 charset=db_config['charset']
             )
             cursor = connection.cursor()
-            print(f"\n成功连接到MySQL数据库: {db_config['host']}:{db_config['port']}/{db_config['database']}")
+            logger.info(f"\n成功连接到MySQL数据库: {db_config['host']}:{db_config['port']}/{db_config['database']}")
             
             # 执行每条SQL语句
             for i, statement in enumerate(statements, 1):
@@ -145,17 +161,34 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                     if not statement.strip() or statement.strip().startswith('--'):
                         continue
                     
-                    print(f"\n执行语句 {i}/{len(statements)}: {statement[:50]}...")
+                    logger.info(f"执行语句 {i}/{len(statements)}: {statement[:50]}...")
                     cursor.execute(statement)
                     connection.commit()
                     success_count += 1
-                    print(f"✓ 执行成功")
+                    logger.info(f"✓ 执行成功")
                     
                 except Error as e:
                     error_count += 1
-                    print(f"✗ 执行失败: {e}")
+                    error_message = str(e)
+                    logger.error(f"✗ 执行失败: {error_message}")
+                    
+                    # 记录错误详情
+                    error_log_path = 'sql_execution_errors.log'
+                    error_detail = f"""
+时间: {time.strftime('%Y-%m-%d %H:%M:%S')}
+文件: {sql_file}
+语句: {statement[:100]}...
+错误: {error_message}
+"""
+                    
+                    with open(error_log_path, 'a', encoding='utf-8') as error_log:
+                        error_log.write(error_detail)
+                    
+                    logger.error(f"错误详情已记录到: {error_log_path}")
+                    
                     # 回滚当前事务
                     connection.rollback()
+                    logger.warning(f"事务已回滚")
                     
                     # 询问是否继续
                     if error_count >= 5:
@@ -163,10 +196,10 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                         if choice.lower() != 'y':
                             break
             
-            print(f"\n=== 执行结果 ===")
-            print(f"成功: {success_count} 条")
-            print(f"失败: {error_count} 条")
-            print(f"总计: {len(statements)} 条")
+            logger.info(f"\n=== 执行结果 ===")
+            logger.info(f"成功: {success_count} 条")
+            logger.info(f"失败: {error_count} 条")
+            logger.info(f"总计: {len(statements)} 条")
             
             return error_count == 0
             
@@ -175,10 +208,10 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                 cursor.close()
             if connection:
                 connection.close()
-                print("数据库连接已关闭")
+                logger.info("数据库连接已关闭")
                 
     except Exception as e:
-        print(f"错误: {e}")
+        logger.error(f"错误: {e}")
         return False
 
 
@@ -203,28 +236,28 @@ def main():
         
         # 检查必需的数据库名
         if not db_config['database']:
-            print("错误: 数据库名未指定，请通过--database参数或在.env文件中设置DB_DATABASE")
+            logger.error("错误: 数据库名未指定，请通过--database参数或在.env文件中设置DB_DATABASE")
             return 1
         
-        print(f"数据库配置:")
-        print(f"  主机: {db_config['host']}:{db_config['port']}")
-        print(f"  用户: {db_config['user']}")
-        print(f"  数据库: {db_config['database']}")
-        print(f"  字符集: {db_config['charset']}")
-        print(f"  配置来源: {'命令行参数' if args.database else '.env文件'}")
+        logger.info(f"数据库配置:")
+        logger.info(f"  主机: {db_config['host']}:{db_config['port']}")
+        logger.info(f"  用户: {db_config['user']}")
+        logger.info(f"  数据库: {db_config['database']}")
+        logger.info(f"  字符集: {db_config['charset']}")
+        logger.info(f"  配置来源: {'命令行参数' if args.database else '.env文件'}")
         
         # 执行SQL文件
         success = execute_sql_file(sql_file, db_config, args.dry_run)
         
         if success:
-            print("\n✅ SQL文件执行完成")
+            logger.info("\n✅ SQL文件执行完成")
             return 0
         else:
-            print("\n❌ SQL文件执行过程中出现错误")
+            logger.error("\n❌ SQL文件执行过程中出现错误")
             return 1
             
     except Exception as e:
-        print(f"错误: {e}")
+        logger.error(f"错误: {e}")
         return 1
 
 
