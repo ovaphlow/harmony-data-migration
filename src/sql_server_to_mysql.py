@@ -138,8 +138,16 @@ def convert_sql_server_to_mysql(sql_content):
     
     # 移除SQL Server特有的COLLATE子句
     sql_content = re.sub(r'\s+COLLATE\s+Chinese_PRC_CI_AS', '', sql_content, flags=re.IGNORECASE)
+    
+    # 删除dbo.前缀
+    sql_content = re.sub(r'\bdbo\.', '', sql_content)
+    
+    # 转换SQL Server的Unicode字符串格式 N'' 为MySQL格式 ''
+    sql_content = re.sub(r"N'([^']*)'", r"'\1'", sql_content)
+    
     # 移除方括号标识符
     sql_content = re.sub(r'\[([^\]]+)\]', r'\1', sql_content)
+    
     # 转换numeric为decimal
     sql_content = re.sub(r'\bnumeric\b', 'decimal', sql_content, flags=re.IGNORECASE)
     
@@ -175,6 +183,12 @@ def convert_sql_server_to_mysql(sql_content):
         
         # 移除COLLATE Chinese_PRC_CI_AS
         processed_line = re.sub(r'COLLATE\s+Chinese_PRC_CI_AS', '', processed_line, flags=re.IGNORECASE)
+        
+        # 删除dbo.前缀
+        processed_line = re.sub(r'\bdbo\.', '', processed_line)
+        
+        # 转换SQL Server的Unicode字符串格式 N'' 为MySQL格式 ''
+        processed_line = re.sub(r"N'([^']*)'", r"'\1'", processed_line)
         
         # 保留非空的处理后行
         if processed_line.strip() or not line.strip():
