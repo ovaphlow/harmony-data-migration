@@ -15,7 +15,7 @@ SQL Server到MySQL语法转换工具
     python3 sql_server_to_mysql.py <输入文件路径>
 
 输出文件：
-    在输入文件同目录下生成 <原文件名>_mysql.sql
+    在target-data目录下生成 <原文件名>_mysql.sql
 
 支持的转换：
 - IDENTITY(1,1) → AUTO_INCREMENT
@@ -60,13 +60,130 @@ def convert_sql_server_to_mysql(sql_content):
         sql_content
     )
     
-    # 2. 移除ALTER TABLE SET语句
-    sql_content = re.sub(r'ALTER TABLE \w+ SET \(LOCK_ESCALATION = TABLE\)\s*GO\s*', '', sql_content)
+    # 2. 转换SET IDENTITY_INSERT语句为MySQL语法
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+.*?\s+ON', 'SET FOREIGN_KEY_CHECKS=0;', sql_content, flags=re.IGNORECASE)
     
-    # 3. 移除GO语句
-    sql_content = re.sub(r'\bGO\b', '', sql_content)
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\.\[.*?\]\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+\[.*?\]\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'SET\s+IDENTITY_INSERT\s+.*?\s+OFF', 'SET FOREIGN_KEY_CHECKS=1;', sql_content, flags=re.IGNORECASE)
     
-    # 4. 更精确地处理CREATE TABLE语句
+    # 3. 移除ALTER TABLE SET LOCK_ESCALATION语句
+    sql_content = re.sub(r'ALTER\s+TABLE\s+\[.*?\]\.\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'ALTER\s+TABLE\s+\[.*?\]\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
+    sql_content = re.sub(r'ALTER\s+TABLE\s+.*?\s+SET\s+\(LOCK_ESCALATION\s*=\s*TABLE\)', '', sql_content, flags=re.IGNORECASE)
+    
+    # 4. 处理ALTER TABLE ADD CONSTRAINT语句，移除SQL Server特有的WITH子句和ON PRIMARY
+    sql_content = re.sub(
+        r'ALTER\s+TABLE\s+(.+?)\s+ADD\s+CONSTRAINT\s+(.+?)\s+PRIMARY\s+KEY.*?WITH\s*\([^)]+\)\s+ON\s+PRIMARY',
+        r'ALTER TABLE \1 ADD PRIMARY KEY',
+        sql_content,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # 更精确地处理WITH子句和ON PRIMARY部分（针对复杂的PRIMARY KEY定义）
+    sql_content = re.sub(
+        r'\s+WITH\s*\([^)]+\)\s+ON\s+PRIMARY\s*',
+        '',
+        sql_content,
+        flags=re.IGNORECASE
+    )
+    
+    # 移除主键注释语句
+    sql_content = re.sub(r'\s*--\s*Primary\s+Key\s+structure\s+for\s+table.*?\n', '\n', sql_content, flags=re.IGNORECASE)
+    
+    # 移除更复杂的WITH子句和ON PRIMARY结构
+    sql_content = re.sub(
+        r'\s*WITH\s*\([^)]*\)\s*ON\s+PRIMARY\s*',
+        '',
+        sql_content,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # 移除SQL Server特有的主键注释分隔符
+    sql_content = re.sub(r'\s*--\s*----------------------------\s*--\s*----------------------------\s*\n', '\n', sql_content, flags=re.IGNORECASE)
+    
+    # 移除完整的ALTER TABLE ADD CONSTRAINT语句（包括WITH和ON PRIMARY）
+    sql_content = re.sub(
+        r'\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?',
+        '',
+        sql_content,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # 移除最后的多行主键定义语句（包含主键结构注释）
+    sql_content = re.sub(
+        r'\s*--\s*----------------------------\s*\n\s*--\s*Primary\s+Key\s+structure\s+for\s+table\s+.*?\n\s*--\s*----------------------------\s*\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n?',
+        '',
+        sql_content,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # 移除独立的ALTER TABLE PRIMARY KEY语句（多行格式）
+    sql_content = re.sub(
+        r'ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+NONCLUSTERED\s*\([^)]+\)\s*\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*\n',
+        '',
+        sql_content,
+        flags=re.IGNORECASE
+    )
+    
+    # 移除文件末尾的ALTER TABLE语句（确保文件结尾干净）
+    sql_content = re.sub(
+        r'\n\s*ALTER\s+TABLE\s+.*?ADD\s+CONSTRAINT\s+.*?PRIMARY\s+KEY\s+.*?\n\s*WITH\s*\([^)]+\)\s*\n\s*ON\s+PRIMARY\s*$',
+        '',
+        sql_content,
+        flags=re.IGNORECASE
+    )
+    
+    # 移除SQL Server特有的COLLATE子句
+    sql_content = re.sub(r'\s+COLLATE\s+Chinese_PRC_CI_AS', '', sql_content, flags=re.IGNORECASE)
+    # 移除方括号标识符
+    sql_content = re.sub(r'\[([^\]]+)\]', r'\1', sql_content)
+    # 转换numeric为decimal
+    sql_content = re.sub(r'\bnumeric\b', 'decimal', sql_content, flags=re.IGNORECASE)
+    
+    # 3. 处理GO语句：将GO语句替换为分号
+    sql_content = re.sub(r'\bGO\b', ';', sql_content)
+    
+    # 4. 处理包含INSERT数据的完整文件
+    lines = sql_content.split('\n')
+    processed_lines = []
+    skip_everything = False
+    
+    for i, line in enumerate(lines):
+        line = line.rstrip()
+        
+        # 如果已经决定跳过所有内容，跳过
+        if skip_everything:
+            continue
+        
+        # 跳过SQL Server特有注释
+        if '-- ----------------------------' in line or '-- Records of' in line:
+            continue
+        
+        # 检查是否到了主键约束定义区域，从这里开始跳过所有内容
+        if ('ALTER TABLE' in line and 'ADD CONSTRAINT' in line and 'PRIMARY KEY' in line) or 'Primary Key structure' in line:
+            skip_everything = True
+            continue
+        
+        # 处理当前行
+        processed_line = line
+        
+        # 移除方括号
+        processed_line = re.sub(r'\[([^\]]+)\]', r'\1', processed_line)
+        
+        # 移除COLLATE Chinese_PRC_CI_AS
+        processed_line = re.sub(r'COLLATE\s+Chinese_PRC_CI_AS', '', processed_line, flags=re.IGNORECASE)
+        
+        # 保留非空的处理后行
+        if processed_line.strip() or not line.strip():
+            processed_lines.append(processed_line if processed_line.strip() == '' else processed_line)
+    
+    # 重建SQL内容
+    sql_content = '\n'.join(processed_lines)
+    
+    # 5. 更精确地处理CREATE TABLE语句
     # 使用正则表达式匹配CREATE TABLE语句 - 修复为非贪婪匹配
     create_table_pattern = re.compile(r'CREATE TABLE\s+\[?dbo\]?\.?\[?(\w+)\]?\s*\((.*?)\)\s*$', re.DOTALL | re.IGNORECASE | re.MULTILINE)
     
@@ -133,7 +250,7 @@ def convert_sql_server_to_mysql(sql_content):
     # 替换所有CREATE TABLE语句
     sql_content = create_table_pattern.sub(process_create_table, sql_content)
     
-    # 5. 清理多余的空行
+    # 6. 清理多余的空行
     sql_content = re.sub(r'\n\s*\n', '\n\n', sql_content)
     
     return sql_content
@@ -197,9 +314,18 @@ def main():
         print(f"错误: 转换过程失败 - {e}")
         return 1
     
-    # 生成输出文件名
-    base_name, ext = os.path.splitext(sql_file)
-    output_file = f"{base_name}_mysql{ext}"
+    # 生成输出文件名 - 保存到target-data目录
+    # 确保target-data目录存在
+    target_dir = os.path.join(os.path.dirname(os.path.dirname(sql_file)), 'target-data')
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # 从输入文件名中提取基础名称
+    base_name = os.path.basename(sql_file)
+    name_without_ext = os.path.splitext(base_name)[0]
+    ext = os.path.splitext(base_name)[1]
+    
+    # 生成目标文件名
+    output_file = os.path.join(target_dir, f"{name_without_ext}_mysql{ext}")
     
     # 保存转换后的SQL文件
     try:
