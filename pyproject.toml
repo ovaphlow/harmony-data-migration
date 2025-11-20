@@ -4,4 +4,7 @@ version = "0.1.0"
 description = "数据迁移项目，用于分析和迁移不同数据源之间的数据"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pymysql>=1.0.0",
+    "python-dotenv>=0.19.0",
+]

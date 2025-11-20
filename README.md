@@ -47,6 +47,117 @@ python3 src/sql_server_to_mysql.py source-data/DRecipe处方.sql
 uv sync
 ```
 
+## MySQL SQL执行器
+
+### 功能特性
+
+- **SQL语句分割**: 智能按分号分割SQL语句，正确处理字符串中的分号
+- **错误处理**: 单条语句执行失败不影响其他语句执行
+- **干运行模式**: 支持只解析不执行的模式，便于预览
+- **连接配置**: 支持自定义MySQL连接参数
+- **环境变量支持**: 支持从.env文件读取数据库配置
+
+### 使用方法
+
+```bash
+# 基本用法
+python3 src/mysql_sql_executor.py <SQL文件路径> --database <数据库名>
+
+# 使用.env文件配置
+# 复制示例配置文件并修改为您的实际配置：
+# cp .env.example .env
+# 编辑.env文件，填入您的实际数据库配置
+
+# .env文件示例内容：
+# DB_HOST=localhost
+# DB_PORT=3306
+# DB_USER=root
+# DB_PASSWORD=yourpassword
+# DB_DATABASE=your_database
+# DB_CHARSET=utf8mb4
+
+# 使用.env文件中的配置执行SQL
+python3 src/mysql_sql_executor.py target-data/DRecipe处方_mysql.sql
+
+# 完整参数示例
+python3 src/mysql_sql_executor.py target-data/DRecipe处方_mysql.sql \
+  --host localhost \
+  --port 3306 \
+  --user root \
+  --password yourpassword \
+  --database your_database \
+  --charset utf8mb4
+
+# 干运行模式（只解析不执行）
+python3 src/mysql_sql_executor.py target-data/DRecipe处方_mysql.sql \
+  --database your_database \
+  --dry-run
+```
+
+### 参数说明
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| sql_file | 要执行的SQL文件路径 | 必需 |
+| --host | MySQL服务器地址 | 从.env文件读取 |
+| --port | MySQL服务器端口 | 从.env文件读取 |
+| --user | MySQL用户名 | 从.env文件读取 |
+| --password | MySQL密码 | 从.env文件读取 |
+| --database | 要连接的数据库名 | 从.env文件读取 |
+| --charset | 字符集 | 从.env文件读取 |
+| --dry-run | 只解析SQL语句，不实际执行 | False |
+
+## 完整迁移脚本
+
+### 功能特性
+
+- **一站式迁移**: 将SQL Server文件转换为MySQL格式并执行
+- **灵活选项**: 支持只转换或只执行的模式
+- **错误处理**: 自动处理转换和执行过程中的错误
+- **环境变量支持**: 支持从.env文件读取数据库配置
+
+### 使用方法
+
+#### 完整迁移（转换+执行）
+
+```bash
+# 使用命令行参数
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql \
+  --database your_database \
+  --user root \
+  --password yourpassword
+
+# 使用.env文件配置
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql
+```
+
+#### 只转换不执行
+
+```bash
+# 使用命令行参数
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql \
+  --convert-only
+
+# 使用.env文件配置
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql \
+  --convert-only
+```
+
+#### 只执行已转换的文件
+
+```bash
+# 使用命令行参数
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql \
+  --execute-only \
+  --database your_database \
+  --user root \
+  --password yourpassword
+
+# 使用.env文件配置
+python3 src/migrate_sql_server_to_mysql.py source-data/DRecipe处方.sql \
+  --execute-only
+```
+
 ## 使用方法
 
 ```bash

@@ -48,6 +48,29 @@ def convert_sql_server_to_mysql(sql_content):
     Returns:
         转换后的MySQL格式的SQL内容
     """
+    # 移除所有多行注释 /* ... */
+    sql_content = re.sub(r'\/\*.*?\*\/', '', sql_content, flags=re.DOTALL)
+    
+    # 移除所有单行注释 --
+    # 注意：需要考虑引号内的注释符号不应被移除
+    # 先处理引号内的内容，暂时替换掉，处理完注释后再恢复
+    quoted_pattern = re.compile(r"'[^']*'")
+    quoted_matches = []
+    
+    def replace_quoted(match):
+        quoted_matches.append(match.group(0))
+        return f"__QUOTED_PLACEHOLDER_{len(quoted_matches) - 1}__"
+    
+    # 替换所有引号内的内容为占位符
+    sql_content = quoted_pattern.sub(replace_quoted, sql_content)
+    
+    # 移除所有单行注释
+    sql_content = re.sub(r'--.*$', '', sql_content, flags=re.MULTILINE)
+    
+    # 恢复引号内的内容
+    for i, quoted_text in enumerate(quoted_matches):
+        sql_content = sql_content.replace(f"__QUOTED_PLACEHOLDER_{i}__", quoted_text)
+    
     # 1. 转换DROP TABLE语句
     sql_content = re.sub(
         r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'\[dbo\]\.\[(\w+)\]\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \[dbo\]\.\[\1\]',
@@ -199,17 +222,15 @@ def convert_sql_server_to_mysql(sql_content):
     
     # 5. 更精确地处理CREATE TABLE语句
     # 使用正则表达式匹配CREATE TABLE语句 - 修复为非贪婪匹配
-    create_table_pattern = re.compile(r'CREATE TABLE\s+\[?dbo\]?\.?\[?(\w+)\]?\s*\((.*?)\)\s*$', re.DOTALL | re.IGNORECASE | re.MULTILINE)
+    create_table_pattern = re.compile(r'CREATE TABLE\s+(\[?dbo\]?\.)?\[?(\w+)\]?\s*\((.*?)\)\s*;', re.DOTALL | re.IGNORECASE)
     
     def process_create_table(match):
-        table_name = match.group(1)
-        table_body = match.group(2)
-        print(f"处理CREATE TABLE语句: {table_name}")
-        print(f"表体内容前100字符: {repr(table_body[:100])}")
+        # 获取表名（去掉可能的dbo.前缀）
+        table_name = match.group(2)
+        table_body = match.group(3)
         
         # 处理列定义
         lines = table_body.split('\n')
-        print(f"分割后的行数: {len(lines)}")
         processed_lines = []
         primary_key_col = None
         
@@ -219,47 +240,59 @@ def convert_sql_server_to_mysql(sql_content):
             if not line:
                 continue
             
-            print(f"处理第{i}行: {repr(original_line)}")
+            # 完全移除注释部分
+            sql_part = line
+            if '--' in line:
+                sql_part = line.split('--')[0].rstrip()
+                # 如果移除注释后内容为空，则跳过此行
+                if not sql_part.strip():
+                    continue
             
             # 处理IDENTITY列（在处理方括号之前）
-            if 'IDENTITY(' in line:
-                print(f"发现IDENTITY列: {line}")
-                print(f"原始行内容: {repr(line)}")
+            if 'IDENTITY(' in sql_part:
                 # 移除IDENTITY关键字
-                line = re.sub(r'\s+IDENTITY\([^)]+\)', '', line)
-                print(f"移除IDENTITY后: {repr(line)}")
+                sql_part = re.sub(r'\s+IDENTITY\([^)]+\)', '', sql_part, flags=re.IGNORECASE)
                 # 添加AUTO_INCREMENT
-                line = re.sub(r'(\[?\w+\]?)\s+int\s+(NOT\s+NULL|NULL)', r'\1 int AUTO_INCREMENT \2', line)
-                print(f"添加AUTO_INCREMENT后: {repr(line)}")
+                sql_part = re.sub(r'(\[?\w+\]?)\s+int\s+(NOT\s+NULL|NULL)', r'\1 int AUTO_INCREMENT \2', sql_part, flags=re.IGNORECASE)
                 # 记录主键列名
-                pk_match = re.search(r'(\[?\w+\]?)\s+int\s+AUTO_INCREMENT\s+NOT\s+NULL', line)
+                pk_match = re.search(r'(\[?\w+\]?)\s+int\s+AUTO_INCREMENT\s+NOT\s+NULL', sql_part, flags=re.IGNORECASE)
                 if pk_match:
                     primary_key_col = pk_match.group(1)
-                    print(f"主键列: {primary_key_col}")
             
             # 移除方括号
-            line = re.sub(r'\[(\w+)\]', r'\1', line)
+            sql_part = re.sub(r'\[(\w+)\]', r'\1', sql_part)
             # 移除COLLATE子句
-            line = re.sub(r'\s+COLLATE\s+[^\s,]+', '', line)
+            sql_part = re.sub(r'\s+COLLATE\s+[^\s,]+', '', sql_part, flags=re.IGNORECASE)
             # 转换数据类型
-            line = re.sub(r'\bmoney\b', 'decimal(19,4)', line)
+            sql_part = re.sub(r'\bmoney\b', 'decimal(19,4)', sql_part, flags=re.IGNORECASE)
             
-            processed_lines.append(line)
+            # 移除尾随逗号
+            sql_part = sql_part.rstrip(',')
+            processed_lines.append(sql_part)
         
-        # 重建表定义
+        # 重建表定义，但现在需要正确处理逗号
+        # 确保每一行都有逗号，除了最后一行
+        if processed_lines:
+            # 为除了最后一行的所有行添加逗号
+            for i in range(len(processed_lines) - 1):
+                if processed_lines[i].strip():
+                    processed_lines[i] += ','
+            
         new_table_body = '\n  '.join(processed_lines)
         
         # 添加PRIMARY KEY约束（如果有AUTO_INCREMENT列）
         if primary_key_col and 'PRIMARY KEY' not in new_table_body:
             # 移除主键列名中的方括号
             clean_pk_col = primary_key_col.strip('[]')
-            # 确保最后一行以逗号结尾
-            if not new_table_body.strip().endswith(','):
-                new_table_body += ','
-            new_table_body += f'\n  PRIMARY KEY ({clean_pk_col})'
+            
+            # 在追加PRIMARY KEY之前，确保最后一行没有多余逗号
+            new_table_body = new_table_body.rstrip(',').rstrip()
+            
+            # 添加主键约束
+            new_table_body += f',\n  PRIMARY KEY ({clean_pk_col})'
         
         # 重建CREATE TABLE语句
-        return f'CREATE TABLE {table_name} ({new_table_body})'
+        return f'CREATE TABLE {table_name} (\n  {new_table_body}\n)'
     
     # 替换所有CREATE TABLE语句
     sql_content = create_table_pattern.sub(process_create_table, sql_content)
