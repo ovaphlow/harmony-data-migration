@@ -9,5 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-target-data/
+source-data/*.sql
+target-data/*.sql
 .env
+*.log
+*.jsonl
