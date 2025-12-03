@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 
 class JSONFormatter(logging.Formatter):
-    """自定义JSON格式化器"""
+    """自定义JSON格式化器 - 用于文件输出"""
     
     def format(self, record):
         log_entry = {
@@ -64,24 +64,100 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_entry, ensure_ascii=False)
 
 
+class ColoredFormatter(logging.Formatter):
+    """自定义彩色格式化器 - 用于控制台输出"""
+    
+    # 颜色定义
+    COLORS = {
+        'DEBUG': '\033[36m',     # 青色
+        'INFO': '\033[32m',      # 绿色
+        'WARNING': '\033[33m',   # 黄色
+        'ERROR': '\033[31m',     # 红色
+        'CRITICAL': '\033[35m',  # 紫色
+        'RESET': '\033[0m'       # 重置
+    }
+    
+    def format(self, record):
+        # 获取时间戳
+        timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 格式化级别名称
+        level_name = record.levelname
+        color = self.COLORS.get(level_name, self.COLORS['RESET'])
+        reset = self.COLORS['RESET']
+        
+        # 构建基本消息
+        message = f"{color}[{timestamp}] {level_name:<8}{reset} {record.getMessage()}"
+        
+        # 添加额外的上下文信息
+        extra_info = []
+        if hasattr(record, 'sql_file'):
+            extra_info.append(f"SQL文件: {record.sql_file}")
+        if hasattr(record, 'statement_count'):
+            extra_info.append(f"语句数量: {record.statement_count}")
+        if hasattr(record, 'statement_index'):
+            extra_info.append(f"语句索引: {record.statement_index}/{getattr(record, 'statement_count', '')}")
+        if hasattr(record, 'statement_preview'):
+            extra_info.append(f"语句预览: {record.statement_preview}")
+        if hasattr(record, 'error_message'):
+            extra_info.append(f"错误信息: {record.error_message}")
+        if hasattr(record, 'success_count'):
+            extra_info.append(f"成功数量: {record.success_count}")
+        if hasattr(record, 'error_count'):
+            extra_info.append(f"错误数量: {record.error_count}")
+        if hasattr(record, 'database_host'):
+            extra_info.append(f"数据库: {record.database_host}:{getattr(record, 'database_port', '')}/{record.database_name}")
+        if hasattr(record, 'execution_time'):
+            extra_info.append(f"执行时间: {record.execution_time:.3f}s")
+        if hasattr(record, 'file_size'):
+            extra_info.append(f"文件大小: {record.file_size} bytes")
+        if hasattr(record, 'error_log_path'):
+            extra_info.append(f"错误日志: {record.error_log_path}")
+        if hasattr(record, 'config_source'):
+            extra_info.append(f"配置来源: {record.config_source}")
+        if hasattr(record, 'dry_run'):
+            extra_info.append(f"干运行: {record.dry_run}")
+        
+        # 添加模块信息
+        if record.module:
+            extra_info.append(f"模块: {record.module}.{record.funcName}:{record.lineno}")
+        
+        if extra_info:
+            message += f" | {' | '.join(extra_info)}"
+        
+        return message
+
+
+class WarningErrorFilter(logging.Filter):
+    """过滤器 - 只允许WARNING和ERROR级别的日志"""
+    
+    def filter(self, record):
+        return record.levelno >= logging.WARNING
+
+
 # 加载.env文件
 load_dotenv()
 
-# 配置日志记录 - 使用JSON格式并保存为jsonl文件
+# 配置日志记录
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# 创建JSON格式化器
+# 创建格式化器
 json_formatter = JSONFormatter()
+colored_formatter = ColoredFormatter()
+warning_error_filter = WarningErrorFilter()
 
-# 控制台输出 - 使用JSON格式但保持可读性
+# 控制台输出 - 使用彩色格式输出所有级别日志
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(json_formatter)
+console_handler.setFormatter(colored_formatter)
+console_handler.setLevel(logging.INFO)  # 控制台显示INFO及以上级别
 logger.addHandler(console_handler)
 
-# 文件输出 - 保存为JSONL格式
-file_handler = logging.FileHandler('mysql_executor.jsonl', encoding='utf-8')
+# 文件输出 - 保存为JSONL格式，只记录WARNING和ERROR级别
+file_handler = logging.FileHandler('mysql_executor_warnings_errors.jsonl', encoding='utf-8')
 file_handler.setFormatter(json_formatter)
+file_handler.setLevel(logging.WARNING)  # 文件只记录WARNING及以上级别
+file_handler.addFilter(warning_error_filter)  # 添加过滤器确保只记录warning和error
 logger.addHandler(file_handler)
 
 
