@@ -2,6 +2,7 @@
 """
 MySQL SQL执行器
 读取SQL文件并连接MySQL数据库执行其中的SQL语句
+修改：实现错误不中断运行，错误输出到日志，执行完毕显示统计信息
 """
 
 import argparse
@@ -18,7 +19,7 @@ from dotenv import load_dotenv
 
 class JSONFormatter(logging.Formatter):
     """自定义JSON格式化器 - 用于文件输出"""
-    
+
     def format(self, record):
         log_entry = {
             'timestamp': datetime.fromtimestamp(record.created).isoformat(),
@@ -28,7 +29,7 @@ class JSONFormatter(logging.Formatter):
             'function': record.funcName,
             'line': record.lineno
         }
-        
+
         # 添加额外的上下文信息
         if hasattr(record, 'sql_file'):
             log_entry['sql_file'] = record.sql_file
@@ -60,13 +61,13 @@ class JSONFormatter(logging.Formatter):
             log_entry['config_source'] = record.config_source
         if hasattr(record, 'dry_run'):
             log_entry['dry_run'] = record.dry_run
-            
+
         return json.dumps(log_entry, ensure_ascii=False)
 
 
 class ColoredFormatter(logging.Formatter):
     """自定义彩色格式化器 - 用于控制台输出"""
-    
+
     # 颜色定义
     COLORS = {
         'DEBUG': '\033[36m',     # 青色
@@ -76,19 +77,19 @@ class ColoredFormatter(logging.Formatter):
         'CRITICAL': '\033[35m',  # 紫色
         'RESET': '\033[0m'       # 重置
     }
-    
+
     def format(self, record):
         # 获取时间戳
         timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
-        
+
         # 格式化级别名称
         level_name = record.levelname
         color = self.COLORS.get(level_name, self.COLORS['RESET'])
         reset = self.COLORS['RESET']
-        
+
         # 构建基本消息
         message = f"{color}[{timestamp}] {level_name:<8}{reset} {record.getMessage()}"
-        
+
         # 添加额外的上下文信息
         extra_info = []
         if hasattr(record, 'sql_file'):
@@ -117,20 +118,20 @@ class ColoredFormatter(logging.Formatter):
             extra_info.append(f"配置来源: {record.config_source}")
         if hasattr(record, 'dry_run'):
             extra_info.append(f"干运行: {record.dry_run}")
-        
+
         # 添加模块信息
         if record.module:
             extra_info.append(f"模块: {record.module}.{record.funcName}:{record.lineno}")
-        
+
         if extra_info:
             message += f" | {' | '.join(extra_info)}"
-        
+
         return message
 
 
 class WarningErrorFilter(logging.Filter):
     """过滤器 - 只允许WARNING和ERROR级别的日志"""
-    
+
     def filter(self, record):
         return record.levelno >= logging.WARNING
 
@@ -179,16 +180,16 @@ def validate_input_file(file_path):
     """验证输入文件的有效性"""
     if not file_path:
         raise ValueError("文件路径不能为空")
-    
+
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件 '{file_path}' 不存在")
-    
+
     if not os.path.isfile(file_path):
         raise ValueError(f"'{file_path}' 不是文件")
-    
+
     if os.path.getsize(file_path) == 0:
         raise ValueError(f"文件 '{file_path}' 为空")
-    
+
     # 检查文件扩展名
     valid_extensions = ['.sql', '.SQL']
     if not any(file_path.lower().endswith(ext) for ext in valid_extensions):
@@ -204,29 +205,29 @@ def split_sql_statements(sql_content):
     # 移除注释
     sql_content = re.sub(r'--.*$', '', sql_content, flags=re.MULTILINE)
     sql_content = re.sub(r'/\*.*?\*/', '', sql_content, flags=re.DOTALL)
-    
+
     # 按分号分割，但要考虑字符串中的分号
     statements = []
     current_statement = ""
     in_string = False
     escape_next = False
-    
+
     for char in sql_content:
         if escape_next:
             current_statement += char
             escape_next = False
             continue
-            
+
         if char == '\\' and in_string:
             escape_next = True
             current_statement += char
             continue
-            
+
         if char in ("'", '"') and not escape_next:
             in_string = not in_string
             current_statement += char
             continue
-            
+
         if char == ';' and not in_string:
             # 语句结束
             statement = current_statement.strip()
@@ -235,18 +236,39 @@ def split_sql_statements(sql_content):
             current_statement = ""
         else:
             current_statement += char
-    
+
     # 添加最后一个语句（如果没有以分号结尾）
     last_statement = current_statement.strip()
     if last_statement:
         statements.append(last_statement)
-    
+
     return statements
+
+
+def print_execution_summary(total_statements, success_count, error_count, sql_file):
+    """打印执行完毕时的统计信息"""
+    print("\n" + "="*60)
+    print("SQL文件执行完毕 - 统计报告")
+    print("="*60)
+    print(f"SQL文件路径: {sql_file}")
+    print(f"总执行语句数量: {total_statements}")
+    print(f"成功执行语句数量: {success_count}")
+    print(f"失败执行语句数量: {error_count}")
+    print(f"执行成功率: {(success_count/total_statements*100):.2f}%" if total_statements > 0 else "执行成功率: N/A")
+
+    if error_count > 0:
+        print(f"\n⚠️  注意: 有 {error_count} 个SQL语句执行失败")
+        print("错误详情已记录到日志文件: sql_execution_errors.jsonl")
+    else:
+        print(f"\n✅ 所有SQL语句执行成功!")
+
+    print("="*60 + "\n")
 
 
 def execute_sql_file(sql_file, db_config, dry_run=False):
     """
     读取SQL文件并执行其中的SQL语句
+    修改：实现错误不中断运行，持续执行所有语句
     """
     try:
         # 读取文件内容
@@ -255,27 +277,29 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
         file_size = os.path.getsize(sql_file)
         extra_info = {'sql_file': sql_file, 'file_size': file_size}
         logger.info("成功读取SQL文件", extra=extra_info)
-        
+
         # 分割SQL语句
         statements = split_sql_statements(sql_content)
-        extra_info = {'sql_file': sql_file, 'statement_count': len(statements)}
+        total_statements = len([s for s in statements if s.strip() and not s.strip().startswith('--')])
+        extra_info = {'sql_file': sql_file, 'statement_count': total_statements}
         logger.info("解析SQL语句完成", extra=extra_info)
-        
+
         if dry_run:
-            extra_info = {'sql_file': sql_file, 'statement_count': len(statements)}
+            extra_info = {'sql_file': sql_file, 'statement_count': total_statements}
             logger.info("开始干运行模式", extra=extra_info)
             for i, statement in enumerate(statements, 1):
-                statement_preview = statement[:200] + "..." if len(statement) > 200 else statement
-                extra = {'sql_file': sql_file, 'statement_index': i, 'statement_preview': statement_preview}
-                logger.info("SQL语句预览", extra=extra)
+                if statement.strip() and not statement.strip().startswith('--'):
+                    statement_preview = statement[:200] + "..." if len(statement) > 200 else statement
+                    extra = {'sql_file': sql_file, 'statement_index': i, 'statement_preview': statement_preview}
+                    logger.info("SQL语句预览", extra=extra)
             return True
-        
+
         # 连接数据库并执行
         connection = None
         cursor = None
         success_count = 0
         error_count = 0
-        
+
         try:
             # 连接数据库
             connection = pymysql.connect(
@@ -294,23 +318,20 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                 'database_name': db_config['database']
             }
             logger.info("成功连接到MySQL数据库", extra=extra_info)
-            
+
             # 执行每条SQL语句
-            for i, statement in enumerate(statements, 1):
+            valid_statements = [s for s in statements if s.strip() and not s.strip().startswith('--')]
+            for i, statement in enumerate(valid_statements, 1):
                 try:
-                    # 跳过空语句和纯注释语句
-                    if not statement.strip() or statement.strip().startswith('--'):
-                        continue
-                    
                     statement_preview = statement[:50] + "..." if len(statement) > 50 else statement
                     extra_info = {
                         'sql_file': sql_file,
                         'statement_index': i,
-                        'statement_count': len(statements),
+                        'statement_count': total_statements,
                         'statement_preview': statement_preview
                     }
                     logger.info("开始执行SQL语句", extra=extra_info)
-                    
+
                     start_time = time.time()
                     cursor.execute(statement)
                     connection.commit()
@@ -318,7 +339,7 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                     success_count += 1
                     extra_info['execution_time'] = execution_time
                     logger.info("SQL语句执行成功", extra=extra_info)
-                    
+
                 except Error as e:
                     error_count += 1
                     error_message = str(e)
@@ -332,7 +353,7 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                         'error_count': error_count
                     }
                     logger.error("SQL语句执行失败", extra=extra_info)
-                    
+
                     # 记录错误详情到单独的JSONL文件
                     error_log_path = 'sql_execution_errors.jsonl'
                     error_detail = {
@@ -343,34 +364,25 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                         'error_message': error_message,
                         'full_statement': statement
                     }
-                    
+
                     with open(error_log_path, 'a', encoding='utf-8') as error_log:
                         error_log.write(json.dumps(error_detail, ensure_ascii=False) + '\n')
-                    
+
                     extra_info_for_log = {'error_log_path': error_log_path}
                     logger.info("错误详情已记录", extra=extra_info_for_log)
-                    
+
                     # 回滚当前事务
                     connection.rollback()
                     extra_info_rollback = {'sql_file': sql_file, 'statement_index': i}
                     logger.warning("事务已回滚", extra=extra_info_rollback)
-                    
-                    # 询问是否继续
-                    if error_count >= 5:
-                        choice = input(f"\n已发生 {error_count} 个错误，是否继续执行? (y/n): ")
-                        if choice.lower() != 'y':
-                            break
-            
-            final_stats = {
-                'sql_file': sql_file,
-                'success_count': success_count,
-                'error_count': error_count,
-                'total_statements': len(statements)
-            }
-            logger.info("SQL执行完成", extra=final_stats)
-            
-            return error_count == 0
-            
+
+                    # 继续执行，不询问是否继续
+
+            # 打印最终统计信息
+            print_execution_summary(total_statements, success_count, error_count, sql_file)
+
+            return True  # 即使有错误也返回True，表示执行完成
+
         finally:
             if cursor:
                 cursor.close()
@@ -383,7 +395,7 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                     'database_name': db_config['database']
                 }
                 logger.info("数据库连接已关闭", extra=extra_info)
-                
+
     except Exception as e:
         extra_info = {'sql_file': sql_file, 'error_message': str(e)}
         logger.error("执行SQL文件时发生错误", extra=extra_info)
@@ -394,11 +406,11 @@ def main():
     """主函数"""
     args = parse_arguments()
     sql_file = args.sql_file
-    
+
     try:
         # 验证输入文件
         validate_input_file(sql_file)
-        
+
         # 数据库配置 - 从命令行参数或环境变量获取
         db_config = {
             'host': args.host if args.host is not None else os.getenv('DB_HOST', 'localhost'),
@@ -408,13 +420,13 @@ def main():
             'database': args.database if args.database is not None else os.getenv('DB_DATABASE'),
             'charset': args.charset if args.charset is not None else os.getenv('DB_CHARSET', 'utf8mb4')
         }
-        
+
         # 检查必需的数据库名
         if not db_config['database']:
             extra_info = {'sql_file': sql_file}
             logger.error("数据库名未指定", extra=extra_info)
             return 1
-        
+
         db_config_info = {
             'sql_file': sql_file,
             'database_host': db_config['host'],
@@ -425,22 +437,12 @@ def main():
             'config_source': '命令行参数' if args.database else '.env文件'
         }
         logger.info("数据库配置已加载", extra=db_config_info)
-        
+
         # 执行SQL文件
         success = execute_sql_file(sql_file, db_config, args.dry_run)
-        
-        final_result = {
-            'sql_file': sql_file,
-            'dry_run': args.dry_run
-        }
-        
-        if success:
-            logger.info("SQL文件执行完成", extra=final_result)
-            return 0
-        else:
-            logger.error("SQL文件执行失败", extra=final_result)
-            return 1
-            
+
+        return 0  # 始终返回0，因为错误不中断执行
+
     except Exception as e:
         extra_info = {'sql_file': sql_file, 'error_message': str(e)}
         logger.error("主函数执行时发生错误", extra=extra_info)
