@@ -469,6 +469,12 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
     增强错误处理和调试信息
     """
     try:
+        # 在程序启动时删除之前的日志文件
+        error_log_path = 'sql_execution_errors.jsonl'
+        if os.path.exists(error_log_path):
+            os.remove(error_log_path)
+            logger.info(f"已删除之前的日志文件: {error_log_path}")
+
         # 使用UTF-8编码读取文件，处理中文和特殊字符
         with open(sql_file, 'r', encoding='utf-8') as f:
             sql_content = f.read()
@@ -547,6 +553,10 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
                     statement_preview = statement[:50] + "..." if len(statement) > 50 else statement
                     statement_length = len(statement)
                     has_special_chars = any(ord(c) > 127 for c in statement)
+
+                    # 将INSERT语句改为INSERT IGNORE以避免主键冲突
+                    if statement.strip().upper().startswith('INSERT INTO'):
+                        statement = statement.replace('INSERT INTO', 'INSERT IGNORE INTO', 1)
 
                     extra_info = {
                         'sql_file': sql_file,

@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # 注释处理
 MULTILINE_COMMENT_PATTERN = re.compile(r'\/\*.*?\*\/', re.DOTALL)
 SINGLELINE_COMMENT_PATTERN = re.compile(r'--.*$', re.MULTILINE)
-QUOTED_PATTERN = re.compile(r"'[^']*'")
+QUOTED_PATTERN = re.compile(r"'[^']*(?:''[^']*)*'")
 
 # 双单引号处理 - SQL Server使用双单引号转义，MySQL使用反斜杠转义
 DOUBLE_SINGLE_QUOTE_PATTERN = re.compile(r"''")
@@ -193,27 +193,12 @@ def convert_sql_server_to_mysql(sql_content):
     logger.info("步骤 6: 处理字符串格式...")
 
     # 转换N''字符串为MySQL格式
+    # 确保空字符串也能正确处理
     sql_content = UNICODE_STRING_PATTERN.sub(lambda m: "'" + m.group(1) + "'", sql_content)
 
-    # 处理双单引号 - SQL Server使用双单引号转义，MySQL使用反斜杠转义
-    # 先保护引号内的内容，避免误处理
-    quoted_sections = []
-
-    def save_quoted_section(match):
-        quoted_sections.append(match.group(0))
-        return f"__QUOTED_PLACEHOLDER_{len(quoted_sections) - 1}__"
-
-    # 临时替换引号内容
-    sql_content = QUOTED_PATTERN.sub(save_quoted_section, sql_content)
-
-    # 处理双单引号，转换为反斜杠转义
-    sql_content = DOUBLE_SINGLE_QUOTE_PATTERN.sub("\\'", sql_content)
-
-    # 恢复引号内容，并处理其中的双单引号
-    for i, quoted_text in enumerate(quoted_sections):
-        # 在引号内容中处理双单引号
-        processed_text = DOUBLE_SINGLE_QUOTE_PATTERN.sub("\\'", quoted_text)
-        sql_content = sql_content.replace(f"__QUOTED_PLACEHOLDER_{i}__", processed_text)
+    # 注意：MySQL默认使用单引号作为字符串分隔符，不需要将''转换为'，保持原样即可
+    # 保留SQL Server的双单引号转义方式，MySQL也支持这种方式
+    # sql_content = DOUBLE_SINGLE_QUOTE_PATTERN.sub("'", sql_content)
 
     logger.info("完成字符串格式转换")
 
@@ -228,9 +213,16 @@ def convert_sql_server_to_mysql(sql_content):
     # 记录处理步骤
     logger.info("步骤 8: 转换数据类型...")
 
-    # 转换数据类型：numeric、money等
+    # 转换数据类型：numeric、money、bit等
     sql_content = NUMERIC_TO_DECIMAL_PATTERN.sub('decimal', sql_content)
     sql_content = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', sql_content)
+
+    # 处理bit类型，转换为int
+    sql_content = re.sub(r'\bBIT\b', 'int', sql_content, flags=re.IGNORECASE)
+
+    # 处理过长的varchar类型，转换为text
+    # 匹配varchar(n)其中n>255
+    sql_content = re.sub(r'varchar\s*\(\s*(25[6-9]|2[6-9]\d|[3-9]\d{2}|[1-9]\d{3,})\s*\)', 'text', sql_content, flags=re.IGNORECASE)
 
     logger.info("完成数据类型转换")
 
@@ -276,18 +268,16 @@ def convert_sql_server_to_mysql(sql_content):
             continue
 
         # 组合优化：一次性完成多个字符串操作
-        # 移除方括号、COLLATE子句、dbo.前缀、转换N''字符串和移除不支持的语句
+        # 移除方括号、COLLATE子句、dbo.前缀和转换数据类型
+        # 注意：UNICODE字符串转换已经在步骤6中处理过，此处不再重复处理
         processed_line = line
         processed_line = BRACKET_PATTERN.sub(r'\1', processed_line)
         processed_line = COLLATE_PATTERN.sub('', processed_line)
         processed_line = DBO_PREFIX_PATTERN.sub('', processed_line)
-        processed_line = UNICODE_STRING_PATTERN.sub(lambda m: "'" + m.group(1) + "'", processed_line)
         processed_line = NUMERIC_TO_DECIMAL_PATTERN.sub('decimal', processed_line)
         processed_line = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', processed_line)
 
-        # 处理双单引号 - SQL Server使用双单引号转义，MySQL使用反斜杠转义
-        # 在INSERT数据处理中也处理双单引号
-        processed_line = DOUBLE_SINGLE_QUOTE_PATTERN.sub("\\'", processed_line)
+        # 双单引号已在步骤6中统一处理，此处不再重复处理
 
         # 在INSERT数据处理步骤也移除ALTER TABLE SET LOCK_ESCALATION
         if re.search(r'ALTER TABLE.*SET\s+LOCK_ESCALATION', processed_line, re.IGNORECASE):
@@ -350,6 +340,7 @@ def convert_sql_server_to_mysql(sql_content):
             sql_part = BRACKET_PATTERN.sub(r'\1', sql_part)
             sql_part = COLLATE_PATTERN.sub('', sql_part)
             sql_part = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', sql_part)
+            sql_part = re.sub(r'\bBIT\b', 'int', sql_part, flags=re.IGNORECASE)
 
             # 移除尾随逗号
             sql_part = sql_part.rstrip(',')
