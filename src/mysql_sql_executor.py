@@ -158,6 +158,10 @@ def parse_arguments():
     parser.add_argument('--database', help='要连接的数据库名 (默认从.env文件读取)')
     parser.add_argument('--charset', help='字符集 (默认从.env文件读取)')
     parser.add_argument('--dry-run', action='store_true', help='只解析SQL语句，不实际执行')
+    parser.add_argument('-b', '--batch-size', type=int, default=1000,
+                        help='Batch size for executing SQL statements (default: 1000)')
+    parser.add_argument('-d', '--disable-constraints', action='store_true',
+                        help='Temporarily disable foreign key and uniqueness constraints during execution for faster imports')
     return parser.parse_args()
 
 
@@ -247,6 +251,51 @@ def preprocess_sql_content(sql_content):
     # 不再处理字符串中的换行符，让split_sql_statements函数直接处理
     # 这样可以避免错误地转义换行符导致的问题
     return sql_content
+
+
+def is_load_data_infile(sql):
+    """检测是否为LOAD DATA INFILE语句
+
+    Args:
+        sql (str): SQL语句
+
+    Returns:
+        bool: 是否为LOAD DATA INFILE语句
+    """
+    return sql.strip().upper().startswith("LOAD DATA")
+
+
+
+def execute_load_data_infile(cursor, sql, sql_file_path):
+    """执行LOAD DATA INFILE语句，处理相对路径
+
+    Args:
+        cursor: MySQL游标对象
+        sql (str): LOAD DATA INFILE语句
+        sql_file_path (str): SQL文件的路径，用于解析相对路径
+
+    Returns:
+        tuple: (success, error_message)
+    """
+    try:
+        import os
+        import re
+
+        # 直接执行原SQL语句，让MySQL处理路径
+        # 因为LOAD DATA INFILE的路径是相对于MySQL服务器的，而不是客户端
+        cursor.execute(sql)
+        return True, None
+    except Exception as e:
+        # 如果失败，尝试添加LOCAL关键字（使用客户端文件路径）
+        try:
+            if "LOCAL" not in sql.upper():
+                local_sql = re.sub(r"LOAD DATA\s+", "LOAD DATA LOCAL ", sql, flags=re.IGNORECASE)
+                cursor.execute(local_sql)
+                return True, None
+            return False, str(e)
+        except Exception as local_e:
+            return False, f"原始错误: {str(e)}\nLOCAL方式错误: {str(local_e)}"
+
 
 
 def split_sql_statements(sql_content):
@@ -462,19 +511,27 @@ def split_sql_statements(sql_content):
     return filtered_statements
 
 
-def execute_sql_file(sql_file, db_config, dry_run=False):
+def execute_sql_file(sql_file, db_config, dry_run=False, batch_size=1000, disable_constraints=False):
     """
     读取SQL文件并执行其中的SQL语句
     修改：实现错误不中断运行，持续执行所有语句
     增强错误处理和调试信息
     """
-    try:
-        # 在程序启动时删除之前的日志文件
-        error_log_path = 'sql_execution_errors.jsonl'
-        if os.path.exists(error_log_path):
-            os.remove(error_log_path)
-            logger.info(f"已删除之前的日志文件: {error_log_path}")
+    # 在程序启动时删除之前的日志文件
+    error_log_path = 'sql_execution_errors.jsonl'
+    if os.path.exists(error_log_path):
+        os.remove(error_log_path)
+        logger.info(f"已删除之前的日志文件: {error_log_path}")
 
+    connection = None
+    cursor = None
+    success_count = 0
+    error_count = 0
+    original_constraints = {}
+    total_statements = 0
+    should_restore_constraints = False
+
+    try:
         # 使用UTF-8编码读取文件，处理中文和特殊字符
         with open(sql_file, 'r', encoding='utf-8') as f:
             sql_content = f.read()
@@ -514,149 +571,256 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
             return True
 
         # 连接数据库并执行
-        connection = None
-        cursor = None
-        success_count = 0
-        error_count = 0
+        # 设置连接参数，确保字符集正确
+        connection = pymysql.connect(
+            host=db_config['host'],
+            port=db_config['port'],
+            user=db_config['user'],
+            password=db_config['password'],
+            database=db_config['database'],
+            charset=db_config['charset'],
+            autocommit=False,
 
-        try:
-            # 设置连接参数，确保字符集正确
-            connection = pymysql.connect(
-                host=db_config['host'],
-                port=db_config['port'],
-                user=db_config['user'],
-                password=db_config['password'],
-                database=db_config['database'],
-                charset=db_config['charset'],
-                use_unicode=True,     # 确保返回Unicode字符串
-                autocommit=False      # 禁用自动提交，使用事务
-            )
-            cursor = connection.cursor()
+            # 性能优化参数
+            connect_timeout=60,  # 增加连接超时时间
+            read_timeout=360,    # 增加读取超时时间，适合大文件导入
+            write_timeout=360,   # 增加写入超时时间，适合大文件导入
 
-            # 设置会话字符集以确保正确处理特殊字符
-            cursor.execute("SET NAMES utf8mb4")
-            cursor.execute("SET CHARACTER SET utf8mb4")
-            cursor.execute("SET collation_connection = 'utf8mb4_unicode_ci'")
+            # 网络优化
+            max_allowed_packet=1073741824,  # 增加允许的数据包大小到1GB
 
-            extra_info = {
-                'sql_file': sql_file,
-                'database_host': db_config['host'],
-                'database_port': db_config['port'],
-                'database_name': db_config['database'],
-                'database_charset': db_config['charset']
-            }
-            logger.info("成功连接到MySQL数据库", extra=extra_info)
+            # 游标行为优化
+            cursorclass=pymysql.cursors.SSCursor,  # 使用流式游标，减少内存占用
 
-            # 执行每条SQL语句
-            for i, statement in enumerate(valid_statements, 1):
-                try:
+            # 连接池相关参数（如果需要）
+            # pool_size=10,
+            # pool_recycle=3600
+        )
+        cursor = connection.cursor()
+
+        # 设置会话字符集以确保正确处理特殊字符
+        cursor.execute("SET NAMES utf8mb4")
+        cursor.execute("SET CHARACTER SET utf8mb4")
+        cursor.execute("SET collation_connection = 'utf8mb4_unicode_ci'")
+
+        # 数据库连接成功日志
+        extra_info = {
+            'sql_file': sql_file,
+            'database_host': db_config['host'],
+            'database_port': db_config['port'],
+            'database_name': db_config['database'],
+            'database_charset': db_config['charset'],
+            'disable_constraints': disable_constraints
+        }
+        logger.info("成功连接到MySQL数据库", extra=extra_info)
+
+        # 临时关闭外键和唯一性检查（如果启用）
+        if disable_constraints:
+            # 记录原始外键检查设置
+            cursor.execute("SELECT @@FOREIGN_KEY_CHECKS")
+            original_constraints['foreign_key_checks'] = cursor.fetchone()[0]
+
+            # 记录原始唯一性检查设置（可选，MySQL没有直接的全局设置）
+
+            # 关闭外键检查
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+
+            # 可选：关闭唯一性检查（通过设置sql_mode）
+            cursor.execute("SELECT @@sql_mode")
+            original_constraints['sql_mode'] = cursor.fetchone()[0]
+            new_sql_mode = original_constraints['sql_mode'].replace('STRICT_TRANS_TABLES', '').replace('STRICT_ALL_TABLES', '').strip()
+            if new_sql_mode:
+                cursor.execute(f"SET sql_mode = '{new_sql_mode}'")
+            else:
+                cursor.execute("SET sql_mode = ''")
+
+            logger.info("临时关闭了外键和唯一性检查", extra={'sql_file': sql_file})
+
+        # 执行SQL语句 - 支持批量处理和单独执行LOAD DATA INFILE
+        batch_count = 0
+        statements_in_batch = []
+        statement_indices = []
+        batch_error = False
+        batch_error_details = []
+
+        for i, statement in enumerate(valid_statements, 1):
+            try:
+                # 检查是否为LOAD DATA INFILE语句，单独执行
+                if is_load_data_infile(statement):
+                    stmt_start_time = time.time()
                     statement_preview = statement[:50] + "..." if len(statement) > 50 else statement
-                    statement_length = len(statement)
-                    has_special_chars = any(ord(c) > 127 for c in statement)
-
-                    # 将INSERT语句改为INSERT IGNORE以避免主键冲突
-                    if statement.strip().upper().startswith('INSERT INTO'):
-                        statement = statement.replace('INSERT INTO', 'INSERT IGNORE INTO', 1)
-
-                    extra_info = {
+                    stmt_extra_info = {
                         'sql_file': sql_file,
                         'statement_index': i,
                         'statement_count': total_statements,
                         'statement_preview': statement_preview,
-                        'statement_length': statement_length,
-                        'has_special_chars': has_special_chars
-                    }
-                    logger.info("开始执行SQL语句", extra=extra_info)
-
-                    # 对于特别长的语句，记录额外调试信息
-                    if statement_length > 10000:
-                        logger.debug(f"执行长语句 {i}，长度: {statement_length}", extra=extra_info)
-                        logger.debug(f"语句开头: {statement[:100]}...", extra=extra_info)
-                        logger.debug(f"语句结尾: ...{statement[-100:]}", extra=extra_info)
-
-                    start_time = time.time()
-                    cursor.execute(statement)
-                    connection.commit()
-                    execution_time = time.time() - start_time
-                    success_count += 1
-                    extra_info['execution_time'] = execution_time
-                    logger.info("SQL语句执行成功", extra=extra_info)
-
-                except Error as e:
-                    error_count += 1
-                    error_message = str(e)
-                    error_code = getattr(e, 'args', [None])[0] if e.args else None
-                    statement_preview = statement[:100] + "..." if len(statement) > 100 else statement
-
-                    # 创建详细的错误信息
-                    error_detail = {
-                        'timestamp': datetime.now().isoformat(),
-                        'sql_file': sql_file,
-                        'statement_index': i,
-                        'statement_preview': statement_preview,
-                        'error_message': error_message,
-                        'error_code': error_code,
-                        'error_type': type(e).__name__,
                         'statement_length': len(statement),
-                        'has_special_chars': any(ord(c) > 127 for c in statement),
-                        'full_statement': statement
+                        'has_special_chars': any(ord(c) > 127 for c in statement)
                     }
+                    logger.info("执行LOAD DATA INFILE语句", extra=stmt_extra_info)
 
-                    # 如果是语法错误，添加更多调试信息
-                    if error_code == 1064 or "syntax error" in error_message.lower():
-                        if len(statement) > 200:
-                            error_detail['statement_start'] = statement[:100]
-                            error_detail['statement_end'] = statement[-100:]
+                    success, error_msg = execute_load_data_infile(cursor, statement, sql_file)
+                    if success:
+                        success_count += 1
+                        execution_time = time.time() - stmt_start_time
+                        logger.info(f"LOAD DATA INFILE语句执行成功，耗时 {execution_time:.4f} 秒", extra=stmt_extra_info)
+                    else:
+                        raise Exception(error_msg)
 
-                        # 检查常见的语法问题
-                        if "'" in statement and statement.count("'") % 2 != 0:
-                            error_detail['possible_issue'] = "未匹配的单引号"
-                        if '"' in statement and statement.count('"') % 2 != 0:
-                            error_detail['possible_issue'] = "未匹配的双引号"
+                    continue  # 跳过批量处理，继续下一条语句
 
+                # 将INSERT语句改为INSERT IGNORE以避免主键冲突
+                if statement.strip().upper().startswith('INSERT INTO'):
+                    statement = statement.replace('INSERT INTO', 'INSERT IGNORE INTO', 1)
+
+                # 收集语句到当前批次
+                statements_in_batch.append(statement)
+                statement_indices.append(i)
+                batch_count += 1
+
+                # 如果达到批量大小或最后一条语句，执行批次
+                if batch_count >= batch_size or i == total_statements:
+                    batch_start_time = time.time()
                     extra_info = {
                         'sql_file': sql_file,
-                        'statement_index': i,
-                        'statement_preview': statement_preview,
-                        'error_message': error_message,
-                        'error_code': error_code,
-                        'success_count': success_count,
-                        'error_count': error_count
+                        'batch_start': statement_indices[0],
+                        'batch_end': i,
+                        'batch_size': batch_count,
+                        'total_statements': total_statements
                     }
-                    logger.error("SQL语句执行失败", extra=extra_info)
+                    logger.info("开始执行SQL批次", extra=extra_info)
 
-                    # 记录错误详情到单独的JSONL文件
-                    error_log_path = 'sql_execution_errors.jsonl'
-                    with open(error_log_path, 'a', encoding='utf-8') as error_log:
-                        error_log.write(json.dumps(error_detail, ensure_ascii=False) + '\n')
+                    # 执行批次中的所有语句
+                    for j, (stmt_idx, batch_stmt) in enumerate(zip(statement_indices, statements_in_batch), 1):
+                        try:
+                            statement_preview = batch_stmt[:50] + "..." if len(batch_stmt) > 50 else batch_stmt
+                            statement_length = len(batch_stmt)
+                            has_special_chars = any(ord(c) > 127 for c in batch_stmt)
 
-                    extra_info_for_log = {'error_log_path': error_log_path}
-                    logger.info("错误详情已记录", extra=extra_info_for_log)
+                            stmt_extra_info = {
+                                'sql_file': sql_file,
+                                'statement_index': stmt_idx,
+                                'statement_count': total_statements,
+                                'statement_preview': statement_preview,
+                                'statement_length': statement_length,
+                                'has_special_chars': has_special_chars,
+                                'batch_position': j,
+                                'batch_size': batch_count
+                            }
+                            logger.debug("执行批次中的SQL语句", extra=stmt_extra_info)
 
-                    # 回滚当前事务
-                    connection.rollback()
-                    extra_info_rollback = {'sql_file': sql_file, 'statement_index': i}
-                    logger.warning("事务已回滚", extra=extra_info_rollback)
+                            # 执行语句 - 处理LOAD DATA INFILE语句
+                            if is_load_data_infile(batch_stmt):
+                                success, error_msg = execute_load_data_infile(cursor, batch_stmt, sql_file)
+                                if not success:
+                                    raise Exception(error_msg)
+                            else:
+                                cursor.execute(batch_stmt)
+                        except Error as e:
+                            # 批次中的语句执行失败，记录错误信息并标记批次错误
+                            batch_error = True
+                            error_message = str(e)
+                            error_code = getattr(e, 'args', [None])[0] if e.args else None
+                            statement_preview = batch_stmt[:100] + "..." if len(batch_stmt) > 100 else batch_stmt
 
-                    # 继续执行，不询问是否继续
+                            error_detail = {
+                                'timestamp': datetime.now().isoformat(),
+                                'sql_file': sql_file,
+                                'statement_index': stmt_idx,
+                                'statement_preview': statement_preview,
+                                'error_message': error_message,
+                                'error_code': error_code,
+                                'error_type': type(e).__name__,
+                                'statement_length': len(batch_stmt),
+                                'has_special_chars': any(ord(c) > 127 for c in batch_stmt),
+                                'full_statement': batch_stmt,
+                                'batch_info': {
+                                    'batch_start': statement_indices[0],
+                                    'batch_end': i,
+                                    'batch_size': batch_count,
+                                    'batch_position': j
+                                }
+                            }
 
-            # 打印最终统计信息
-            print_execution_summary(total_statements, success_count, error_count, sql_file)
+                            if error_code == 1064 or "syntax error" in error_message.lower():
+                                if len(batch_stmt) > 200:
+                                    error_detail['statement_start'] = batch_stmt[:100]
+                                    error_detail['statement_end'] = batch_stmt[-100:]
+                                if "'" in batch_stmt and batch_stmt.count("'") % 2 != 0:
+                                    error_detail['possible_issue'] = "未匹配的单引号"
+                                if '"' in batch_stmt and batch_stmt.count('"') % 2 != 0:
+                                    error_detail['possible_issue'] = "未匹配的双引号"
 
-            return True  # 即使有错误也返回True，表示执行完成
+                            batch_error_details.append(error_detail)
+                            break  # 停止执行当前批次的剩余语句
 
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                connection.close()
-                extra_info = {
+                    # 提交或回滚批次
+                    if batch_error:
+                        # 回滚批次
+                        connection.rollback()
+                        logger.warning("批次执行失败，事务已回滚", extra=extra_info)
+
+                        # 记录批次中的所有错误
+                        for error_detail in batch_error_details:
+                            error_count += 1
+                            success_count += len(statements_in_batch) - len(batch_error_details) - 1 if j > 1 else 0
+
+                            extra_info = {
+                                'sql_file': sql_file,
+                                'statement_index': error_detail['statement_index'],
+                                'statement_preview': error_detail['statement_preview'],
+                                'error_message': error_detail['error_message'],
+                                'error_code': error_detail['error_code'],
+                                'success_count': success_count,
+                                'error_count': error_count
+                            }
+                            logger.error("SQL语句执行失败", extra=extra_info)
+
+                            # 记录错误详情到JSONL文件
+                            error_log_path = 'sql_execution_errors.jsonl'
+                            with open(error_log_path, 'a', encoding='utf-8') as error_log:
+                                error_log.write(json.dumps(error_detail, ensure_ascii=False) + '\n')
+                    else:
+                        # 提交批次
+                        connection.commit()
+                        execution_time = time.time() - batch_start_time
+                        success_count += batch_count
+
+                        batch_extra_info = {
+                            'sql_file': sql_file,
+                            'batch_start': statement_indices[0],
+                            'batch_end': i,
+                            'batch_size': batch_count,
+                            'execution_time': execution_time,
+                            'success_count': success_count,
+                            'error_count': error_count
+                        }
+                        logger.info("批次执行成功", extra=batch_extra_info)
+
+                    # 重置批次变量
+                    batch_count = 0
+                    statements_in_batch = []
+                    statement_indices = []
+                    batch_error = False
+                    batch_error_details = []
+
+                # 继续执行，不询问是否继续
+            except Exception as e:
+                # 处理单个语句执行异常
+                error_count += 1
+                stmt_extra_info = {
                     'sql_file': sql_file,
-                    'database_host': db_config['host'],
-                    'database_port': db_config['port'],
-                    'database_name': db_config['database']
+                    'statement_index': i,
+                    'error_message': str(e),
+                    'success_count': success_count,
+                    'error_count': error_count
                 }
-                logger.info("数据库连接已关闭", extra=extra_info)
+                logger.error("SQL语句执行失败", extra=stmt_extra_info)
+
+        # 打印最终统计信息
+        print_execution_summary(total_statements, success_count, error_count, sql_file)
+
+        return True  # 即使有错误也返回True，表示执行完成
 
     except Exception as e:
         extra_info = {
@@ -667,6 +831,40 @@ def execute_sql_file(sql_file, db_config, dry_run=False):
         }
         logger.error("执行SQL文件时发生错误", extra=extra_info)
         return False
+    finally:
+        # 恢复约束设置
+        if disable_constraints and cursor and original_constraints:
+            # 恢复原始约束设置
+            if 'foreign_key_checks' in original_constraints:
+                try:
+                    cursor.execute(f"SET FOREIGN_KEY_CHECKS = {original_constraints['foreign_key_checks']}")
+                except Exception as e:
+                    logger.warning("恢复外键检查设置失败", extra={'sql_file': sql_file, 'error_message': str(e)})
+            if 'sql_mode' in original_constraints:
+                try:
+                    cursor.execute(f"SET sql_mode = '{original_constraints['sql_mode']}'")
+                except Exception as e:
+                    logger.warning("恢复SQL模式设置失败", extra={'sql_file': sql_file, 'error_message': str(e)})
+            logger.info("已尝试恢复外键和唯一性检查设置", extra={'sql_file': sql_file})
+
+        # 关闭游标和连接
+        if cursor:
+            try:
+                cursor.close()
+            except Exception as e:
+                logger.warning("关闭游标失败", extra={'sql_file': sql_file, 'error_message': str(e)})
+        if connection:
+            try:
+                connection.close()
+                extra_info = {
+                    'sql_file': sql_file,
+                    'database_host': db_config['host'],
+                    'database_port': db_config['port'],
+                    'database_name': db_config['database']
+                }
+                logger.info("数据库连接已关闭", extra=extra_info)
+            except Exception as e:
+                logger.warning("关闭数据库连接失败", extra={'sql_file': sql_file, 'error_message': str(e)})
 
 
 def print_execution_summary(total_statements, success_count, error_count, sql_file):
@@ -739,7 +937,13 @@ def main():
         logger.info("数据库配置已加载", extra=db_config_info)
 
         # 执行SQL文件
-        success = execute_sql_file(sql_file, db_config, args.dry_run)
+        success = execute_sql_file(
+            sql_file,
+            db_config,
+            args.dry_run,
+            batch_size=args.batch_size,
+            disable_constraints=args.disable_constraints
+        )
 
         return 0  # 始终返回0，因为错误不中断执行
 
