@@ -31,6 +31,100 @@ import re
 import logging
 import time
 
+# MySQL 保留关键字列表
+MYSQL_RESERVED_KEYWORDS = {
+    'ACCESSIBLE', 'ACCOUNT', 'ACTION', 'ADD', 'ADMIN', 'AFTER', 'AGAINST', 'AGGREGATE',
+    'ALGORITHM', 'ALL', 'ALTER', 'ALWAYS', 'ANALYSE', 'ANALYZE', 'AND', 'ANY', 'AS', 'ASC',
+    'ASENSITIVE', 'AT', 'AUTHENTICATION', 'AUTOEXTEND_SIZE', 'AUTO_INCREMENT', 'AVG',
+    'AVG_ROW_LENGTH', 'BACKUP', 'BEFORE', 'BEGIN', 'BETWEEN', 'BIGINT', 'BINARY', 'BINLOG',
+    'BIT', 'BLOB', 'BLOCK', 'BOOL', 'BOOLEAN', 'BOTH', 'BTREE', 'BY', 'BYTE', 'CACHE',
+    'CALL', 'CASCADE', 'CASCADED', 'CASE', 'CATALOG_NAME', 'CHAIN', 'CHANGE', 'CHANGED',
+    'CHAR', 'CHARACTER', 'CHARSET', 'CHECK', 'CHECKSUM', 'CIPHER', 'CLASS_ORIGIN',
+    'CLIENT', 'CLOSE', 'COALESCE', 'CODE', 'COLLATE', 'COLLATION', 'COLUMN', 'COLUMNS',
+    'COLUMN_FORMAT', 'COLUMN_NAME', 'COMMENT', 'COMMIT', 'COMMITTED', 'COMPRESSED',
+    'COMPRESSION', 'CONCURRENT', 'CONDITION', 'CONNECTION', 'CONSISTENT', 'CONSTRAINT',
+    'CONSTRAINT_CATALOG', 'CONSTRAINT_NAME', 'CONSTRAINT_SCHEMA', 'CONTAINS', 'CONTEXT',
+    'CONTINUE', 'CONVERT', 'CPU', 'CREATE', 'CROSS', 'CUBE', 'CURRENT', 'CURRENT_DATE',
+    'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'CURRENT_USER', 'CURSOR', 'CURSOR_NAME', 'DATA',
+    'DATABASE', 'DATABASES', 'DATAFILE', 'DATE', 'DATETIME', 'DAY', 'DAY_HOUR', 'DAY_MICROSECOND',
+    'DAY_MINUTE', 'DAY_SECOND', 'DEALLOCATE', 'DEC', 'DECIMAL', 'DECLARE', 'DEFAULT',
+    'DEFAULT_AUTH', 'DEFINER', 'DELAYED', 'DELAY_KEY_WRITE', 'DELETE', 'DESC', 'DESCRIBE',
+    'DESCRIPTION', 'DETERMINISTIC', 'DIAGNOSTICS', 'DIRECTORY', 'DISABLE', 'DISCARD',
+    'DISK', 'DISTINCT', 'DISTINCTROW', 'DIV', 'DO', 'DOUBLE', 'DROP', 'DUAL', 'DUMMY',
+    'DUMPFILE', 'DUPLICATE', 'DYNAMIC', 'EACH', 'ELSE', 'ELSEIF', 'ENABLE', 'ENCLOSED',
+    'ENCRYPTION', 'END', 'ENDS', 'ENGINE', 'ENGINES', 'ENUM', 'ERROR', 'ERRORS', 'ESCAPE',
+    'ESCAPED', 'EVENT', 'EVENTS', 'EVERY', 'EXCEPT', 'EXCHANGE', 'EXECUTE', 'EXISTS',
+    'EXIT', 'EXPLAIN', 'EXPRESSION', 'EXTENDED', 'FAST', 'FAULTS', 'FETCH', 'FIELDS',
+    'FILE', 'FILE_BLOCK_SIZE', 'FILTER', 'FIRST', 'FIXED', 'FLOAT', 'FLOAT4', 'FLOAT8',
+    'FLUSH', 'FOLLOWING', 'FOR', 'FORCE', 'FOREIGN', 'FORMAT', 'FOUND', 'FROM', 'FULL',
+    'FULLTEXT', 'FUNCTION', 'GENERAL', 'GENERATED', 'GEOMETRY', 'GEOMETRYCOLLECTION',
+    'GET', 'GET_FORMAT', 'GLOBAL', 'GRANT', 'GRANTS', 'GROUP', 'GROUP_REPLICATION',
+    'HANDLER', 'HASH', 'HAVING', 'HELP', 'HIGH_PRIORITY', 'HOST', 'HOSTS', 'HOUR',
+    'HOUR_MICROSECOND', 'HOUR_MINUTE', 'HOUR_SECOND', 'IDENTIFIED', 'IDENTITY', 'IF',
+    'IGNORE', 'IGNORE_SERVER_IDS', 'IMPORT', 'IN', 'INDEX', 'INDEXES', 'INFILE', 'INNER',
+    'INNODB', 'INOUT', 'INSENSITIVE', 'INSERT', 'INSERT_METHOD', 'INSTALL', 'INSTANCE',
+    'INT', 'INT1', 'INT2', 'INT3', 'INT4', 'INT8', 'INTEGER', 'INTERVAL', 'INTO', 'INVOKER',
+    'IO', 'IO_AFTER_GTIDS', 'IO_BEFORE_GTIDS', 'IO_THREAD', 'IPC', 'IS', 'ISOLATION',
+    'ISSUER', 'ITERATE', 'JOIN', 'JSON', 'KEY', 'KEYS', 'KEY_BLOCK_SIZE', 'KILL', 'LABEL',
+    'LANGUAGE', 'LAST', 'LEADING', 'LEAVE', 'LEAVES', 'LEFT', 'LESS', 'LEVEL', 'LIKE',
+    'LIMIT', 'LINEAR', 'LINES', 'LINESTRING', 'LIST', 'LOAD', 'LOCAL', 'LOCALTIME',
+    'LOCALTIMESTAMP', 'LOCK', 'LOCKS', 'LOGFILE', 'LOGS', 'LONG', 'LONGBLOB', 'LONGTEXT',
+    'LOOP', 'LOW_PRIORITY', 'MASTER', 'MASTER_AUTO_POSITION', 'MASTER_BIND', 'MASTER_CONNECT_RETRY',
+    'MASTER_DELAY', 'MASTER_HEARTBEAT_PERIOD', 'MASTER_HOST', 'MASTER_LOG_FILE', 'MASTER_LOG_POS',
+    'MASTER_PASSWORD', 'MASTER_PORT', 'MASTER_RETRY_COUNT', 'MASTER_SERVER_ID', 'MASTER_SSL',
+    'MASTER_SSL_CA', 'MASTER_SSL_CAPATH', 'MASTER_SSL_CERT', 'MASTER_SSL_CIPHER', 'MASTER_SSL_CRL',
+    'MASTER_SSL_CRLPATH', 'MASTER_SSL_KEY', 'MASTER_TLS_VERSION', 'MASTER_USER', 'MATCH',
+    'MAX', 'MAX_CONNECTIONS_PER_HOUR', 'MAX_QUERIES_PER_HOUR', 'MAX_ROWS', 'MAX_SIZE',
+    'MAX_STATEMENT_TIME', 'MAX_UPDATES_PER_HOUR', 'MAX_USER_CONNECTIONS', 'MEDIUM',
+    'MEDIUMBLOB', 'MEDIUMINT', 'MEDIUMTEXT', 'MEMBER', 'MERGE', 'MESSAGE_TEXT', 'MIDDLEINT',
+    'MIGRATE', 'MIN', 'MIN_ROWS', 'MINUTE', 'MINUTE_MICROSECOND', 'MINUTE_SECOND', 'MOD', 'MODIFIES',
+    'MODE', 'MODIFY', 'MONTH', 'MULTILINESTRING', 'MULTIPOINT', 'MULTIPOLYGON', 'MUTEX',
+    'MYSQL_ERRNO', 'NAME', 'NAMES', 'NATIONAL', 'NATURAL', 'NCHAR', 'NDBCLUSTER', 'NEEDS',
+    'NEXT', 'NO', 'NODEGROUP', 'NONE', 'NOT', 'NO_WAIT', 'NULL', 'NUMBER', 'NUMERIC',
+    'NVARCHAR', 'OF', 'OLD_PASSWORD', 'ON', 'ONE', 'ONLY', 'OPEN', 'OPTIMIZE', 'OPTIMIZER_COSTS',
+    'OPTION', 'OPTIONALLY', 'OPTIONS', 'OR', 'ORDER', 'OUT', 'OUTER', 'OUTFILE', 'OVER',
+    'PARTIAL', 'PARTITION', 'PARTITIONING', 'PARTITIONS', 'PASSWORD', 'PATH', 'PERCENT',
+    'PERIOD', 'PERIODIC', 'PERMANENT', 'PERSIST', 'PERSIST_ONLY', 'PLUGIN', 'PLUGINS',
+    'PLUGIN_DIR', 'PLUGIN_NAME', 'POINTER', 'POINT', 'POLYGON', 'PORT', 'PRECEDING',
+    'PRECISION', 'PREPARE', 'PRESERVE', 'PREV', 'PRIMARY', 'PRIVILEGES', 'PROCEDURE',
+    'PROCESS', 'PROCESSLIST', 'PROFILE', 'PROFILES', 'PROXY', 'PURGE', 'QUERY', 'QUICK',
+    'QUOTE', 'RANGE', 'READ', 'READS', 'READ_ONLY', 'READ_WRITE', 'REAL', 'REBUILD', 'RECOVER',
+    'RECURSIVE', 'REDOFILE', 'REDO_BUFFER_SIZE', 'REDUNDANT', 'REFERENCES', 'REGEXP',
+    'RELAY', 'RELAYLOG', 'RELAY_LOG_FILE', 'RELAY_LOG_POS', 'RELAY_THREAD', 'RELEASE',
+    'RELOAD', 'REMOVE', 'RENAME', 'REORGANIZE', 'REPAIR', 'REPEAT', 'REPEATABLE', 'REPLACE',
+    'REPLICATE_DO_DB', 'REPLICATE_DO_TABLE', 'REPLICATE_IGNORE_DB', 'REPLICATE_IGNORE_TABLE',
+    'REPLICATE_REWRITE_DB', 'REPLICATE_WILD_DO_TABLE', 'REPLICATE_WILD_IGNORE_TABLE',
+    'REQUIRE', 'RESET', 'RESIGNAL', 'RESTORE', 'RESTRICT', 'RESULT', 'RETURN', 'RETURNED_SQLSTATE',
+    'REVOKE', 'RIGHT', 'RLIKE', 'ROLE', 'ROLLBACK', 'ROLLUP', 'ROTATE', 'ROUTINE', 'ROW',
+    'ROWS', 'ROW_COUNT', 'ROW_FORMAT', 'ROW_NUMBER', 'RPAD', 'RTREE', 'SAVEPOINT', 'SCHEMA',
+    'SCHEMA_NAME', 'SCHEMAS', 'SECOND', 'SECOND_MICROSECOND', 'SECURITY', 'SELECT', 'SENSITIVE',
+    'SEPARATOR', 'SERIAL', 'SERIALIZABLE', 'SERVER', 'SESSION', 'SET', 'SHARE', 'SHOW',
+    'SHUTDOWN', 'SIGNAL', 'SIGNED', 'SIMPLE', 'SLAVE', 'SLOW', 'SMALLINT', 'SNAPSHOT',
+    'SOME', 'SONAME', 'SOUNDS', 'SOURCE', 'SPATIAL', 'SPECIFIC', 'SQL', 'SQLEXCEPTION',
+    'SQLSTATE', 'SQLWARNING', 'SQL_BIG_RESULT', 'SQL_BUFFER_RESULT', 'SQL_CACHE', 'SQL_CALC_FOUND_ROWS',
+    'SQL_NO_CACHE', 'SQL_SMALL_RESULT', 'SQL_THREAD', 'SQL_TSI_DAY', 'SQL_TSI_HOUR', 'SQL_TSI_MINUTE',
+    'SQL_TSI_MONTH', 'SQL_TSI_QUARTER', 'SQL_TSI_SECOND', 'SQL_TSI_WEEK', 'SQL_TSI_YEAR',
+    'SSL', 'START', 'STARTING', 'STATUS', 'STOP', 'STORAGE', 'STRAIGHT_JOIN', 'STRING',
+    'SUBCLASS_ORIGIN', 'SUBJECT', 'SUBPARTITION', 'SUBPARTITIONS', 'SUBSTRING', 'SUM',
+    'SUPER', 'SUSPEND', 'SWAPS', 'SWITCHES', 'TABLE', 'TABLES', 'TABLESPACE', 'TABLE_CHECKSUM',
+    'TABLE_NAME', 'TEMPORARY', 'TEMPTABLE', 'TERMINATED', 'TEXT', 'THAN', 'THEN', 'TIME',
+    'TIMESTAMP', 'TIMEZONE_HOUR', 'TIMEZONE_MINUTE', 'TINYBLOB', 'TINYINT', 'TINYTEXT',
+    'TO', 'TRAILING', 'TRANSACTION', 'TRANSACTIONS', 'TRANSACTIONAL', 'TRIGGER',
+    'TRIGGER_CATALOG', 'TRIGGER_NAME', 'TRIGGER_SCHEMA', 'TRIGGERS', 'TRUNCATE', 'TYPE',
+    'TYPES', 'UNBOUNDED', 'UNCOMMITTED', 'UNDEFINED', 'UNDO', 'UNDOFILE', 'UNDO_BUFFER_SIZE',
+    'UNION', 'UNIQUE', 'UNSIGNED', 'UPDATE', 'USAGE', 'USE', 'USER', 'USER_RESOURCES',
+    'USING', 'UTC_DATE', 'UTC_TIME', 'UTC_TIMESTAMP', 'VALIDATION', 'VALUE', 'VALUES',
+    'VARBINARY', 'VARCHAR', 'VARCHARACTER', 'VARIABLES', 'VARYING', 'VIEW', 'VIRTUAL',
+    'WAIT', 'WARNINGS', 'WHEN', 'WHERE', 'WHILE', 'WITH', 'WITHOUT', 'WORK', 'WRITE',
+    'X509', 'XA', 'XID', 'XOR', 'YEAR', 'YEAR_MONTH', 'ZEROFILL'}
+
+# 辅助函数：检查并包裹MySQL保留关键字
+def quote_reserved_keyword(word):
+    """如果是MySQL保留关键字，则用反引号包裹，否则返回原词"""
+    if word.upper() in MYSQL_RESERVED_KEYWORDS:
+        return f'`{word}`'
+    return word
+
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -46,7 +140,7 @@ DOUBLE_SINGLE_QUOTE_PATTERN = re.compile(r"''")
 
 # DROP TABLE语句
 DROP_TABLE_PATTERN1 = re.compile(r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'\[dbo\]\.\[(\w+)\]\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \[dbo\]\.\[\1\]')
-DROP_TABLE_PATTERN2 = re.compile(r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'(\w+)\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \1')
+DROP_TABLE_PATTERN2 = re.compile(r'IF EXISTS \(SELECT \* FROM sys\.all_objects WHERE object_id = OBJECT_ID\(N\'([\w\.]+)\'\) AND type IN \(\'U\'\)\)\s+DROP TABLE \1')
 
 # IDENTITY_INSERT语句
 IDENTITY_INSERT_ON_PATTERNS = [
@@ -283,6 +377,27 @@ def convert_sql_server_to_mysql(sql_content):
         if re.search(r'ALTER TABLE.*SET\s+LOCK_ESCALATION', processed_line, re.IGNORECASE):
             processed_line = ''
 
+        # 处理INSERT语句中的保留关键字列名
+        insert_pattern = re.compile(r'^(INSERT\s+(IGNORE\s+)?INTO\s+\w+\s*\()(.*?)(\))\s+(VALUES.*)', re.IGNORECASE | re.DOTALL)
+        match = insert_pattern.match(processed_line)
+        if match:
+            insert_start = match.group(1)
+            columns_part = match.group(3)
+            insert_end = match.group(4)
+            values_part = match.group(5)
+
+            # 拆分列名
+            columns = []
+            for col in columns_part.split(','):
+                col = col.strip()
+                # 移除可能的方括号
+                col = col.strip('[]')
+                # 检查并包裹保留关键字
+                columns.append(quote_reserved_keyword(col))
+
+            # 重新组合INSERT语句
+            processed_line = f"{insert_start}{', '.join(columns)}{insert_end} {values_part}"
+
         # 保留非空的处理后行
         if processed_line.strip() or not line.strip():
             processed_lines.append(processed_line if processed_line.strip() == '' else processed_line)
@@ -341,6 +456,18 @@ def convert_sql_server_to_mysql(sql_content):
             sql_part = COLLATE_PATTERN.sub('', sql_part)
             sql_part = MONEY_TO_DECIMAL_PATTERN.sub('decimal(19,4)', sql_part)
             sql_part = re.sub(r'\bBIT\b', 'int', sql_part, flags=re.IGNORECASE)
+
+            # 检查并包裹MySQL保留关键字作为列名
+            # 匹配列名模式：列名后跟数据类型或约束
+            column_name_pattern = re.compile(r'^(\w+)\s+(\w|\()')
+            match = column_name_pattern.match(sql_part)
+            if match:
+                column_name = match.group(1)
+                rest_part = sql_part[len(column_name):]
+                # 检查并包裹保留关键字
+                quoted_col_name = quote_reserved_keyword(column_name)
+                if quoted_col_name != column_name:
+                    sql_part = quoted_col_name + rest_part
 
             # 移除尾随逗号
             sql_part = sql_part.rstrip(',')
